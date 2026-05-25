@@ -1,0 +1,67 @@
+{
+  "feishu_app": {
+    "app_id": "cli_a916a85099611bd6",
+    "app_secret": "3PWg3GVYhLmlFgFIHNFH9eb22jSQkHd2",
+    "scheduled_chat_id": "oc_192f75e2f67ef1eb2d1a92dcc9b9016a"
+  },
+  "feishu_bots": [
+    {
+      "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/9296e0bf-ad1c-486a-8f2e-498e425ee434",
+      "secret": "k0B2TNXsKNSRuoMg1EqB4c"
+    }
+  ],
+  "dingtalk_bots": [
+    {
+      "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=ef46cb7f-af36-4bbd-9d50-4128a536a2c7",
+      "secret": "jqqUQ6ztNsSrhQRMJyBDKZh0w63NDJtIlANZ4KRYkR8__dYg17wElVsLiEtZWnYk"
+    }
+  ],
+  "notification_preferences": {
+    "scheduled_market_report": {
+      "enabled": true,
+      "note": "由飞书指令机器人进程在配置 scheduled_chat_id 时执行整点推送；关闭后机器人侧跳过发送。"
+    },
+    "semi_auto_pending_signal": {
+      "enabled": true,
+      "note": "半自动：生成待确认信号时推送飞书。"
+    },
+    "full_auto_execution": {
+      "enabled": true,
+      "notify_on_failure": true,
+      "note": "全自动：成交成功/失败时推送（失败可单独关闭）。"
+    },
+    "observer_mode_digest": {
+      "enabled": true,
+      "note": "观察模式：连续无信号达到阈值时的汇总推送。"
+    },
+    "bottom_reversal_watch": {
+      "enabled": true,
+      "symbols": [
+        "RXRX.US",
+        "HOOD.US",
+        "TSLA.US",
+        "AAPL.US",
+        "NVDA.US",
+        "601899.SH",
+        "002639.SZ"
+      ],
+      "poll_interval_seconds": 300,
+      "only_on_edge": true,
+      "cooldown_minutes": 120,
+      "note": "与信号中心同源：bottom_reversal_hint；由 API 进程后台轮询并推送飞书。"
+    },
+    "feishu_builtin_reversal_monitor": {
+      "enabled": true,
+      "selection_mode": "multi",
+      "selected_conditions": [
+        "rsi_rebound",
+        "macd_bullish_cross_below_zero",
+        "bollinger_rebound",
+        "hammer_candle",
+        "volume_rebound",
+        "ma5_cross_ma20"
+      ],
+      "note": "飞书机器人内置的多条件反转检测线程（与信号中心算法不同）。默认关闭，避免与 API 侧重复。"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "max_order_amount": 1000.0,
+  "max_daily_loss_pct": 0.2,
+  "stop_loss_pct": 0.05,
+  "max_position_pct": 0.3,
+  "enabled": true,
+  "updated_at": "2026-05-19T10:32:47.776732"
+}

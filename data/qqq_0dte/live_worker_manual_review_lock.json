@@ -1,0 +1,99 @@
+{
+  "locked": true,
+  "instance": "0dte",
+  "created_at": "2026-05-23T09:47:57.506639+00:00",
+  "reason": "entry_order_not_fully_filled",
+  "message": "manual review required before new intraday entries",
+  "order_ids": [
+    "oid-1"
+  ],
+  "expected_symbols": [
+    "QQQ260619C00700000.US"
+  ],
+  "expected_legs": [
+    {
+      "symbol": "QQQ260619C00700000.US",
+      "side": "buy",
+      "contracts": 1,
+      "price": 0.5
+    }
+  ],
+  "detail": {
+    "enabled": true,
+    "order_ids": [
+      "oid-1"
+    ],
+    "expected_legs": 1,
+    "submitted_legs": 1,
+    "reconciliation": {
+      "enabled": true,
+      "order_ids": [
+        "oid-1"
+      ],
+      "query": {
+        "ok": true,
+        "requested": 1,
+        "matched": 1,
+        "missing": [],
+        "errors": []
+      },
+      "orders": [
+        {
+          "order_id": "oid-1",
+          "symbol": "QQQ260619C00700000.US",
+          "side": "buy",
+          "status": "New",
+          "kind": "active",
+          "requested_quantity": 1,
+          "filled_quantity": 0,
+          "avg_fill_price": 0.0
+        }
+      ],
+      "expected_contracts": 1,
+      "filled_contracts": 0,
+      "all_expected_filled": false,
+      "uncertain": true,
+      "active_orders": [
+        {
+          "order_id": "oid-1",
+          "symbol": "QQQ260619C00700000.US",
+          "side": "buy",
+          "status": "New",
+          "kind": "active",
+          "requested_quantity": 1,
+          "filled_quantity": 0,
+          "avg_fill_price": 0.0
+        }
+      ],
+      "rejected_orders": [],
+      "cancelled_orders": [],
+      "unknown_orders": [],
+      "filled_ledger_rows": [],
+      "inferred_fills": [],
+      "positions_error": "positions_api_unavailable"
+    },
+    "error": "entry_order_not_fully_filled",
+    "active_after_submit": 1,
+    "active_orders": [
+      {
+        "order_id": "oid-1",
+        "symbol": "QQQ260619C00700000.US",
+        "status": "New"
+      }
+    ],
+    "cancels": [
+      {
+        "order_id": "oid-1",
+        "ok": true,
+        "response": {
+          "ok": true
+        },
+        "status": "New"
+      }
+    ],
+    "manual_review_required": true
+  },
+  "owner_id": null,
+  "account_id": null,
+  "broker_provider": null
+}

@@ -1,0 +1,35 @@
+{
+  "api_base_url": "http://127.0.0.1:8010",
+  "symbol": "QQQ.US",
+  "history_days": 2,
+  "kline": "1m",
+  "poll_seconds": 30,
+  "dry_run": true,
+  "api_key": null,
+  "_comment_api_key": "推荐：控制台登录后 POST /auth/api-keys 生成；Worker 用请求头 X-Api-Key。也可设环境变量 QQQ_LIVE_API_KEY（优先于本字段）",
+  "api_bearer_token": null,
+  "_comment_api_bearer": "兼容：浏览器 session token，Authorization Bearer。也可设 QQQ_LIVE_API_BEARER_TOKEN。与 api_key 二选一即可",
+  "confirmation_token": null,
+  "expiry_date": null,
+  "kline_wall_clock_timezone": "Asia/Shanghai",
+  "resolve": {
+    "strike_window": 5,
+    "standard_only": false,
+    "max_strike_diff": 1.5
+  },
+  "strategy_config": {
+    "_comment_morning_strangle": "可选：早盘宽跨示例 — strategy_variant=morning_strangle，并设置 strangle_* 与 max_trades_per_day: 1",
+    "strategy_variant": "reaction_zone",
+    "strangle_entry_start_hhmm_et": "09:35",
+    "strangle_entry_end_hhmm_et": "10:00",
+    "strangle_force_close_hhmm_et": "12:00",
+    "strangle_range_pct": 0.003,
+    "strangle_take_profit_return": 1.0,
+    "strangle_long_leg_take_profit_pct": 1.0,
+    "strangle_short_leg_take_profit_pct": 1.0,
+    "strangle_underlying_field": "low",
+    "strike_step": 1,
+    "call_strikes_otm": 2,
+    "put_strikes_otm": 2
+  }
+}

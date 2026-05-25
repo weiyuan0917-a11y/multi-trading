@@ -1,0 +1,45 @@
+<svg width="232" height="64" viewBox="0 0 232 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MultiTrading">
+  <defs>
+    <linearGradient id="mt-logo-bg" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#12243F"/>
+      <stop offset="0.52" stop-color="#0B172A"/>
+      <stop offset="1" stop-color="#0A2C32"/>
+    </linearGradient>
+    <linearGradient id="mt-logo-ring" x1="8" y1="5" x2="58" y2="55" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#66E7FF"/>
+      <stop offset="0.48" stop-color="#5B6CFF"/>
+      <stop offset="1" stop-color="#20F2A9"/>
+    </linearGradient>
+    <linearGradient id="mt-logo-line" x1="14" y1="42" x2="50" y2="20" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7DD3FC"/>
+      <stop offset="0.45" stop-color="#5B6CFF"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <linearGradient id="mt-logo-word" x1="72" y1="18" x2="218" y2="47" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FAFC"/>
+      <stop offset="0.56" stop-color="#D8FCFF"/>
+      <stop offset="1" stop-color="#8AFBE2"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="15" fill="url(#mt-logo-bg)"/>
+  <rect x="5" y="5" width="54" height="54" rx="14" stroke="url(#mt-logo-ring)" stroke-width="2"/>
+  <g opacity="0.42" stroke="#94A3B8" stroke-width="2" stroke-linecap="round">
+    <path d="M18 46V22"/>
+    <path d="M28 46V17"/>
+    <path d="M38 46V27"/>
+    <path d="M48 46V15"/>
+    <path d="M15 46H51"/>
+  </g>
+  <g stroke="#D8FCFF" stroke-width="2.4" stroke-linecap="round">
+    <path d="M15 30H21"/>
+    <path d="M25 25H31"/>
+    <path d="M35 34H41"/>
+    <path d="M45 23H51"/>
+  </g>
+  <path d="M15 39L24.5 31L32.5 35L47 22" stroke="url(#mt-logo-line)" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M47 22L48.4 29.3L41.2 26.9" stroke="#8AFBE2" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="24.5" cy="31" r="2.3" fill="#D8FCFF"/>
+  <circle cx="32.5" cy="35" r="2.3" fill="#D8FCFF"/>
+  <text x="74" y="39" fill="url(#mt-logo-word)" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="760" letter-spacing="0">MultiTrading</text>
+  <path d="M75 47H206" stroke="url(#mt-logo-ring)" stroke-width="2" stroke-linecap="round" opacity="0.58"/>
+</svg>

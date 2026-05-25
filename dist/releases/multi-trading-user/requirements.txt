@@ -1,0 +1,44 @@
+# Project dependencies
+# Slow PyPI in CN mirror example:
+# pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# MCP SDK
+mcp
+
+# Longbridge SDK（建议固定版本，避免 pip 回退到需 Rust 编译的旧版源码包）
+longbridge>=4.0.0,<5
+
+# Optional Tiger Brokers SDK. Install only when connecting a Tiger account.
+# tigeropen
+
+# Data processing
+numpy
+pandas
+scikit-learn
+
+# Optional CN/A-share data providers.
+# Install what you need; the app auto-detects availability and falls back to local cache.
+# mootdx
+# akshare
+# baostock
+# tushare
+
+# HTTP requests
+requests
+
+# Feishu SDK
+lark-oapi
+
+# UI API
+fastapi
+uvicorn
+# Pin starlette for MCP / sse-starlette compatibility (avoid resolver backtracking)
+starlette>=0.41.0
+
+# Other
+tzdata
+
+# TradingAgents（AI 助手页依赖 LangGraph 等，体积较大）
+# 若仅需行情/交易可跳过；需要该页时安装：
+#   pip install -r requirements-tradingagents.txt
+# 必须使用与启动 uvicorn 相同的解释器/虚拟环境。
