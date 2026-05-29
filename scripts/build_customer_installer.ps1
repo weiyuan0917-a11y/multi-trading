@@ -25,6 +25,21 @@ function Require-File($Path, $Message) {
   }
 }
 
+function Stop-ListenersOnPort([int]$Port) {
+  try {
+    $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    foreach ($conn in $connections) {
+      if (-not $conn.OwningProcess) { continue }
+      $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+      if (-not $proc) { continue }
+      Write-Host "[INFO] Stopping process on port ${Port}: $($proc.ProcessName) ($($proc.Id))"
+      Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+  } catch {
+    Write-Host "[WARN] Could not inspect/stop listeners on port ${Port}: $($_.Exception.Message)"
+  }
+}
+
 function Assert-NotExists($Path, $Message) {
   if (Test-Path $Path) {
     throw "${Message}: $Path"
@@ -117,15 +132,16 @@ function Assert-CustomerPackageContentsLegacy {
   }
 
   $tradeConfirmationHit = $false
-  foreach ($rootPath in @((Join-Path $frontendOut ".next"), (Join-Path $frontendOut "server.js"))) {
+  $tradeChunkRoots = @(
+    (Join-Path $frontendOut ".next\server\chunks\ssr"),
+    (Join-Path $frontendOut ".next\server\app\trade"),
+    (Join-Path $frontendOut ".next\static\chunks")
+  )
+  foreach ($rootPath in $tradeChunkRoots) {
     if (-not (Test-Path $rootPath)) { continue }
-    $rootItem = Get-Item -LiteralPath $rootPath
-    $files = if ($rootItem.PSIsContainer) {
-      Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue
-    } else {
-      @($rootItem)
-    }
-    $hits = $files | Select-String -Pattern "请输入 L3 confirmation_token", "请在下单区域填写 L3 confirmation_token" -SimpleMatch -ErrorAction SilentlyContinue
+    $files = Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match "trade|app_trade_page" -or $_.FullName -match "[\\/]trade[\\/]" }
+    $hits = $files | Select-String -Pattern "confirmation_token" -SimpleMatch -ErrorAction SilentlyContinue
     if ($hits) {
       $tradeConfirmationHit = $true
       break
@@ -175,15 +191,16 @@ function Assert-CustomerPackageContents {
   }
 
   $tradeConfirmationHit = $false
-  foreach ($rootPath in @((Join-Path $frontendOut ".next"), (Join-Path $frontendOut "server.js"))) {
+  $tradeChunkRoots = @(
+    (Join-Path $frontendOut ".next\server\chunks\ssr"),
+    (Join-Path $frontendOut ".next\server\app\trade"),
+    (Join-Path $frontendOut ".next\static\chunks")
+  )
+  foreach ($rootPath in $tradeChunkRoots) {
     if (-not (Test-Path $rootPath)) { continue }
-    $rootItem = Get-Item -LiteralPath $rootPath
-    $files = if ($rootItem.PSIsContainer) {
-      Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue
-    } else {
-      @($rootItem)
-    }
-    $hits = $files | Select-String -Pattern "请输入 L3 confirmation_token", "请在下单区域填写 L3 confirmation_token" -SimpleMatch -ErrorAction SilentlyContinue
+    $files = Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match "trade|app_trade_page" -or $_.FullName -match "[\\/]trade[\\/]" }
+    $hits = $files | Select-String -Pattern "confirmation_token" -SimpleMatch -ErrorAction SilentlyContinue
     if ($hits) {
       $tradeConfirmationHit = $true
       break
@@ -293,6 +310,8 @@ Write-Host "[1/9] Cleaning old customer build..."
 cmd.exe /c "taskkill /F /IM MultiTradingLauncher.exe >nul 2>nul"
 cmd.exe /c "taskkill /F /IM Backend.exe >nul 2>nul"
 cmd.exe /c "taskkill /F /IM CustomerLauncher.exe >nul 2>nul"
+Stop-ListenersOnPort 3010
+Stop-ListenersOnPort 8010
 if (Test-Path $releaseDir) {
   Remove-Item -LiteralPath $releaseDir -Recurse -Force
 }
@@ -319,6 +338,10 @@ if ($ReuseFrontend -and (Test-Path $standaloneServer) -and (Test-Path $static)) 
       $env:NEXT_PUBLIC_MT_BUILD_TARGET = "customer"
       $env:NEXT_TELEMETRY_DISABLED = "1"
       Remove-Item -LiteralPath (Join-Path $frontendDir ".next") -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath (Join-Path $frontendDir "tsconfig.tsbuildinfo") -Force -ErrorAction SilentlyContinue
+      if (Test-Path (Join-Path $frontendDir ".next\dev")) {
+        throw "frontend .next\dev cache is still present; stop the dev server before customer build."
+      }
       npm install
       npm run build
     } finally {
