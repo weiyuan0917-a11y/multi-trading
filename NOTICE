@@ -1,0 +1,36 @@
+Multi-Trading
+Copyright 2026 Multi-Trading contributors
+
+Multi-Trading is released under the Apache License, Version 2.0.
+
+The Multi-Trading name, logo, and visual identity are used to identify this
+project. The Apache License does not grant trademark rights. Please do not use
+the project name or logo in a way that suggests endorsement, official
+affiliation, or authorship by the Multi-Trading maintainers unless you have
+written permission.
+
+Acknowledgements
+----------------
+
+This project is built with, integrates with, or is inspired by open-source
+projects and public developer ecosystems, including:
+
+- TradingAgents by TauricResearch, an open-source multi-agent financial
+  trading research framework.
+- OpenBB, an open financial data and analytics platform.
+- FastAPI, Uvicorn, Starlette, Next.js, React, Tailwind CSS, ECharts,
+  Model Context Protocol, Longbridge OpenAPI SDK, pandas, NumPy,
+  scikit-learn, and other open-source dependencies listed in the dependency
+  files and source tree.
+
+Third-party names, trademarks, and logos belong to their respective owners.
+Multi-Trading is not affiliated with, endorsed by, or sponsored by those
+projects or companies unless explicitly stated.
+
+Trading and investment risk
+---------------------------
+
+Multi-Trading is software for research, automation, and workflow management.
+It does not provide investment advice, financial advice, legal advice, tax
+advice, or broker-dealer services. Users are solely responsible for their
+trading decisions, account credentials, regulatory compliance, and losses.

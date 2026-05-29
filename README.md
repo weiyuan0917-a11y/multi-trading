@@ -1,4 +1,14 @@
-# Multi-Trading 量化交易系统
+<p align="center">
+  <img src="frontend/public/brand/multitrading-logo.svg" alt="Multi-Trading" width="360" />
+</p>
+
+<h1 align="center">Multi-Trading 量化交易系统</h1>
+
+<p align="center">
+  <a href="./LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/License-Apache--2.0-blue.svg" /></a>
+  <a href="./SECURITY.md"><img alt="Security policy" src="https://img.shields.io/badge/Security-policy-brightgreen.svg" /></a>
+  <a href="./DISCLAIMER.md"><img alt="Not financial advice" src="https://img.shields.io/badge/Trading-risk%20warning-orange.svg" /></a>
+</p>
 
 基于 `Broker OpenAPI (LongPort-compatible provider)` + `MCP` + `FastAPI` + `Next.js` 的交易与策略平台。  
 它支持两种使用方式：
@@ -844,6 +854,29 @@ multi-trading/
 
 ---
 
+## 14. 开源许可、致谢与风险声明
+
+本项目以 [Apache License 2.0](./LICENSE) 开源发布。该许可证保留版权声明、专利授权和免责声明，适合社区协作与商业友好的二次开发。
+
+请同时阅读：
+
+- [NOTICE](./NOTICE)：项目版权、品牌与第三方致谢
+- [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)：主要开源依赖与上游项目说明
+- [DISCLAIMER.md](./DISCLAIMER.md)：交易风险、投资建议与自动化执行免责声明
+- [CONTRIBUTING.md](./CONTRIBUTING.md)：贡献规范
+- [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)：社区行为准则
+- [SECURITY.md](./SECURITY.md)：安全策略与漏洞报告方式
+
+特别感谢以下开源项目和社区：
+
+- [TradingAgents](https://github.com/TauricResearch/TradingAgents)：多智能体金融研究框架，本项目可选集成其研究链路。
+- [OpenBB](https://github.com/OpenBB-finance/OpenBB)：开放金融数据平台，本项目可选接入 OpenBB API/服务能力。
+- [FastAPI](https://github.com/fastapi/fastapi)、[Next.js](https://github.com/vercel/next.js)、[Model Context Protocol](https://github.com/modelcontextprotocol)、[Longbridge OpenAPI SDK](https://github.com/longbridgeapp/openapi) 等基础设施项目。
+
+Multi-Trading 与上述项目、品牌或公司没有官方从属、背书或授权关系，除非另有明确说明。使用第三方服务、SDK 或数据源时，请自行遵守其许可证、服务条款、数据授权和所在地区监管要求。
+
+---
+
 ## 文档入口
 
 - [参数与术语说明](./参数与术语说明.md)
@@ -851,7 +884,7 @@ multi-trading/
 
 ---
 
-## 14. 参考链接
+## 15. 参考链接
 
 - [LongPort OpenAPI (LongPort-compatible provider)](https://open.longportapp.com/)
 - [Model Context Protocol](https://github.com/modelcontextprotocol)
