@@ -26,6 +26,7 @@ api/auto_trader_config.backups.json
 .venv/
 venv/
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
