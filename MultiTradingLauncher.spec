@@ -6,7 +6,12 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=[
+        'config.env_loader',
+        'config.user_env_store',
+        'backend_uvicorn_spec',
+        'runtime_process_utils',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

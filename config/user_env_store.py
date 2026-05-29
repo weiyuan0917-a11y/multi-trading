@@ -29,6 +29,7 @@ USER_ENV_MANAGED_KEYS: frozenset[str] = frozenset(
         "FINNHUB_API_KEY",
         "TIINGO_API_KEY",
         "FRED_API_KEY",
+        "FMP_API_KEY",
         "COINGECKO_API_KEY",
         "OPENCLAW_MCP_MAX_LEVEL",
         "OPENCLAW_MCP_ALLOW_L3",
@@ -79,6 +80,26 @@ USER_ENV_MANAGED_KEYS: frozenset[str] = frozenset(
     }
 )
 
+ROOT_ENV_ONLY_KEYS: frozenset[str] = frozenset(
+    {
+        "MT_BUILD_TARGET",
+        "NEXT_PUBLIC_MT_BUILD_TARGET",
+        "MULTITRADING_ROOT",
+        "LONGPORT_API_PORT",
+        "LONGPORT_WEB_PORT",
+        "LOCAL_AGENT_ALLOW_USER_OWNERS",
+        "NEXT_TELEMETRY_DISABLED",
+        "BILLING_PUBLIC_ORDER_API_URL",
+        "NEXT_PUBLIC_BILLING_PUBLIC_ORDER_API_URL",
+        "BILLING_ORDER_API_URL",
+        "NEXT_PUBLIC_BILLING_ORDER_API_URL",
+        "NEXT_PUBLIC_CONVEX_URL",
+        "NEXT_PUBLIC_CONVEX_HTTP_ACTIONS_URL",
+        "NEXT_PUBLIC_CONVEX_SITE_URL",
+        "CONVEX_SITE_URL",
+    }
+)
+
 # 与 .env.example「性能与稳定性优化」一致；新用户或缺键时自动写入各用户 data/user_env/<用户>.env
 # 用户文件中显式设置的值优先（覆盖下列默认）。
 USER_ENV_PERFORMANCE_DEFAULTS: dict[str, str] = {
@@ -122,7 +143,7 @@ _ROOT_ENV_STUB = """# Multi-Trading：API 密钥已按登录用户隔离，保�
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[1]).resolve()
 
 
 def user_env_dir(root: Path | None = None) -> Path:
@@ -166,9 +187,14 @@ def migrate_legacy_root_env(root: Path | None = None) -> bool:
     返回是否执行了迁移写盘。
     """
     root = root or project_root()
+    if str(os.getenv("MT_BUILD_TARGET", "")).strip().lower() == "customer":
+        return False
     legacy = root / ".env"
     target = user_env_file_path(LEGACY_MIGRATION_USERNAME, root)
     legacy_vals = _parse_env_file(legacy)
+    if not legacy_vals:
+        return False
+    legacy_vals = {k: v for k, v in legacy_vals.items() if k not in ROOT_ENV_ONLY_KEYS}
     if not legacy_vals:
         return False
     existing = _parse_env_file(target)
@@ -209,6 +235,8 @@ def merge_user_env_into_os_environ(username: str, root: Path | None = None) -> N
     for key in USER_ENV_MANAGED_KEYS:
         os.environ[key] = str(data.get(key, "") or "").strip()
     for k, v in data.items():
+        if k in ROOT_ENV_ONLY_KEYS:
+            continue
         if k not in USER_ENV_MANAGED_KEYS:
             os.environ[k] = str(v or "").strip()
 
@@ -252,5 +280,6 @@ def combined_env_for_cli(root: Path | None = None) -> dict[str, str]:
     migrate_legacy_root_env(root)
     base = _parse_env_file(root / ".env")
     user = resolve_user_env_with_defaults(LEGACY_MIGRATION_USERNAME, root)
-    merged = {**base, **user}
+    user = {k: v for k, v in user.items() if k not in ROOT_ENV_ONLY_KEYS}
+    merged = {**user, **base}
     return merged

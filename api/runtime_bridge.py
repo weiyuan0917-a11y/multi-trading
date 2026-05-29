@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -984,15 +985,30 @@ def setup_convex_dev_restart() -> dict[str, Any]:
     )
 
 
-def cn_market_data_provider_status() -> dict[str, Any]:
+def _apply_owner_env(owner_id: str | None) -> None:
+    owner = str(owner_id or "").strip()
+    if not owner:
+        return
+    try:
+        from config.user_env_store import apply_light_session_env_for_user
+
+        apply_light_session_env_for_user(owner, Path(_m().ROOT))
+    except Exception:
+        pass
+
+
+def cn_market_data_provider_status(owner_id: str | None = None) -> dict[str, Any]:
+    _apply_owner_env(owner_id)
     return get_cn_market_data_service().provider_status()
 
 
-def public_market_data_provider_status() -> dict[str, Any]:
+def public_market_data_provider_status(owner_id: str | None = None) -> dict[str, Any]:
+    _apply_owner_env(owner_id)
     return get_public_market_data_service().provider_status()
 
 
-def market_data_provider_status() -> dict[str, Any]:
+def market_data_provider_status(owner_id: str | None = None) -> dict[str, Any]:
+    _apply_owner_env(owner_id)
     cn = get_cn_market_data_service().provider_status()
     public = get_public_market_data_service().provider_status()
     out = dict(cn)
@@ -1078,6 +1094,18 @@ def setup_install_cn_market_data_provider(body: dict[str, Any]) -> dict[str, Any
             packages.append(pkg)
     if not packages:
         raise m.HTTPException(status_code=400, detail="no_allowed_packages_requested")
+
+    is_customer_build = str(os.getenv("MT_BUILD_TARGET", "")).strip().lower() == "customer"
+    is_frozen_backend = bool(getattr(getattr(m, "sys", None), "frozen", False))
+    if is_customer_build or is_frozen_backend:
+        return {
+            "ok": False,
+            "packages": packages,
+            "installed": [],
+            "error": "runtime_package_install_disabled_customer_build",
+            "hint": "Customer edition is packaged as Backend.exe and does not include a writable Python/pip environment. Bundle these providers at build time, or use built-in public/cache sources.",
+            "provider_status": get_cn_market_data_service().provider_status(),
+        }
 
     installed: list[dict[str, Any]] = []
     try:
@@ -1880,12 +1908,13 @@ def _auto_trading_setup_stop_body(module_id: str) -> dict[str, Any]:
 
 def auto_trading_module_start(module_id: str, body: dict[str, Any] | None = None, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
-    result = setup_start_services(_auto_trading_setup_start_body(mid, body), owner_id=owner_id)
     return {
-        "ok": True,
+        "ok": False,
         "module_id": mid,
         "action": "start",
-        "result": result,
+        "disabled": True,
+        "reason": "auto_trading_removed",
+        "result": {"ok": False, "reason": "auto_trading_removed"},
         "module": _auto_trading_module_status_from_services(mid, owner_id=owner_id),
     }
 
@@ -1905,13 +1934,14 @@ def auto_trading_module_stop(module_id: str, body: dict[str, Any] | None = None,
 def auto_trading_module_restart(module_id: str, body: dict[str, Any] | None = None, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
     stopped = setup_stop_services(_auto_trading_setup_stop_body(mid), owner_id=owner_id)
-    started = setup_start_services(_auto_trading_setup_start_body(mid, body), owner_id=owner_id)
     return {
-        "ok": True,
+        "ok": False,
         "module_id": mid,
         "action": "restart",
+        "disabled": True,
+        "reason": "auto_trading_removed",
         "stopped": stopped,
-        "started": started,
+        "started": {"ok": False, "reason": "auto_trading_removed"},
         "module": _auto_trading_module_status_from_services(mid, owner_id=owner_id),
     }
 
@@ -3318,20 +3348,8 @@ def _stock_options_swing_append_ledger(event: dict[str, Any]) -> dict[str, Any]:
 
 def stock_options_swing_refresh_positions_runtime(owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
-    cfg = stock_options_swing_config_get(owner_id=owner_id)
     path = m.STOCK_OPTIONS_SWING_WORKER_RUNTIME_FILE
-    try:
-        from api import stock_options_swing_worker as sw
-
-        sw._API_BASE_URL = str(cfg.get("api_base_url") or sw._API_BASE_URL).strip().rstrip("/")
-        sw._API_BEARER_TOKEN = sw._resolve_api_bearer(cfg)
-        sw._API_KEY = sw._resolve_api_key(cfg)
-        sw._API_LOCAL_OWNER = str(owner_id or cfg.get("owner_id") or sw._API_LOCAL_OWNER or "").strip().lower()
-        sw._API_ACCOUNT_ID = str(cfg.get("account_id") or sw._API_ACCOUNT_ID or "").strip()
-        sw._API_BROKER_PROVIDER = str(cfg.get("broker_provider") or sw._API_BROKER_PROVIDER or "").strip().lower()
-        snapshot = sw.build_position_management_snapshot(cfg)
-    except Exception as e:
-        return {"ok": False, "error": str(e), "path": path}
+    snapshot = {"ok": False, "disabled": True, "reason": "auto_trading_removed"}
 
     existing: dict[str, Any] = {}
     if os.path.isfile(path):

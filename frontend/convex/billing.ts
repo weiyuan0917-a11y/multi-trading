@@ -590,6 +590,58 @@ export const createManualOrder = internalMutationGeneric({
   },
 });
 
+export const publicCreateManualOrder = internalMutationGeneric({
+  args: {
+    email: v.string(),
+    ownerId: v.string(),
+    plan: v.union(v.literal("pro"), v.literal("premium")),
+    billingCycle: v.union(v.literal("month"), v.literal("year")),
+    paymentMethod: v.optional(v.string()),
+    paymentProvider: v.optional(v.string()),
+    customerNote: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const email = normalizeEmail(args.email);
+    if (!email || !email.includes("@")) throw new Error("email_required");
+    const ownerId = assertOwnerId(args.ownerId);
+    const plan = normalizePlan(args.plan);
+    if (plan === "free") throw new Error("paid_plan_required");
+    const billingCycle = normalizeBillingCycle(args.billingCycle);
+    const timestamp = now();
+    const orderNo = createOrderNo(timestamp);
+    const intent = createPaymentIntent({
+      paymentProvider: args.paymentProvider,
+      paymentMethod: args.paymentMethod,
+      orderNo,
+    });
+    const amountCny = manualOrderAmount(plan, billingCycle);
+    const row = {
+      orderNo,
+      email,
+      ownerId,
+      plan,
+      billingCycle,
+      amountCny,
+      currency: "CNY" as const,
+      paymentMethod: intent.paymentMethod,
+      paymentProvider: intent.paymentProvider,
+      providerOrderId: intent.providerOrderId,
+      providerStatus: intent.providerStatus,
+      payUrl: intent.payUrl,
+      qrCodeUrl: intent.qrCodeUrl,
+      expiresAt: intent.expiresAt,
+      providerPayload: intent.providerPayload,
+      status: "pending" as const,
+      customerNote: String(args.customerNote || "").trim() || undefined,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const id = await ctx.db.insert("manualOrders", row);
+    const saved = await ctx.db.get(id);
+    return { ok: true, order: manualOrderToPublic(saved) };
+  },
+});
+
 export const listManualOrders = internalQueryGeneric({
   args: {
     webhookSecret: v.string(),

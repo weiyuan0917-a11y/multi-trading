@@ -204,6 +204,18 @@ function betterEffectiveRow(left: DeliveryRow, right: DeliveryRow) {
 }
 
 export default function AdminLicensePage() {
+  if (process.env.NEXT_PUBLIC_MT_BUILD_TARGET === "customer") {
+    return (
+      <PageShell>
+        <div className="panel space-y-3 border-slate-700 bg-slate-950/40 text-sm text-slate-300">
+          <div className="text-xl font-semibold text-slate-50">License 发放</div>
+          <p>客户安装包不包含管理员发证功能。</p>
+          该功能仅保留在管理员版本中；客户只需要在个人中心导入管理员签发的 License。
+        </div>
+      </PageShell>
+    );
+  }
+
   const entitlements = useEntitlements();
   const [email, setEmail] = useState("");
   const [ownerId, setOwnerId] = useState("");
@@ -497,18 +509,34 @@ export default function AdminLicensePage() {
         </div>
       ) : null}
 
-      <section className="panel space-y-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+      <details className="panel group space-y-4 border-slate-700/70 bg-slate-950/35">
+        <summary className="flex cursor-pointer list-none flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="section-title">Convex Dev 本地进程</div>
-            <p className="mt-1 text-sm text-slate-500">
-              用于启动或重启 License 签发依赖的本地 Convex dev；命令在 frontend 目录执行 npm run convex:dev。
+            <div className="text-sm font-semibold text-slate-300">开发调试工具</div>
+            <div className="mt-1 text-lg font-semibold text-slate-100">Convex Dev 本地进程</div>
+            <p className="mt-1 text-sm leading-6 text-slate-500">
+              生产发证和付款订单走云端 Convex；本地 Convex dev 只用于开发、调试 schema 或 HTTP Action，日常可以保持停止。
             </p>
           </div>
-          <span className={`rounded-full border px-3 py-1 text-sm font-semibold ${convexDevTone(convexDev?.running)}`}>
-            {convexDevLoading ? "检测中" : convexDev?.running ? "运行中" : "未运行"}
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-cyan-300/25 bg-cyan-300/10 px-3 py-1 text-xs font-semibold text-cyan-100">
+              默认收起
+            </span>
+            <span className={`rounded-full border px-3 py-1 text-sm font-semibold ${convexDevTone(convexDev?.running)}`}>
+              {convexDevLoading ? "检测中" : convexDev?.running ? "本地运行中" : "本地未运行"}
+            </span>
+          </div>
+        </summary>
+
+        <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/10 p-3 text-sm leading-6 text-cyan-50/85">
+          云端 Dashboard 请用 <span className="font-mono text-cyan-100">npx convex dashboard --prod</span> 打开；只有修改 Convex 函数或本地模拟发证时，才需要启动这里的本地进程。
         </div>
+
+        {convexDev?.running ? (
+          <div className="rounded-xl border border-amber-300/25 bg-amber-300/10 p-3 text-sm leading-6 text-amber-100">
+            检测到本地 Convex dev 正在运行。生产发证不依赖它，如无调试需要，可以停止以释放本地端口。
+          </div>
+        ) : null}
 
         <div className="grid gap-2 text-sm text-slate-300 md:grid-cols-2 xl:grid-cols-4">
           <div>
@@ -540,11 +568,11 @@ export default function AdminLicensePage() {
           </button>
           <button
             type="button"
-            className="btn-primary disabled:cursor-not-allowed disabled:opacity-45"
+            className="btn-secondary disabled:cursor-not-allowed disabled:opacity-45"
             onClick={() => void runConvexDevAction("start")}
             disabled={Boolean(convexDevAction) || Boolean(convexDev?.running)}
           >
-            {convexDevAction === "start" ? "启动中..." : "启动 Convex Dev"}
+            {convexDevAction === "start" ? "启动中..." : "启动本地 Convex Dev"}
           </button>
           <button
             type="button"
@@ -574,7 +602,7 @@ export default function AdminLicensePage() {
             </pre>
           </details>
         ) : null}
-      </section>
+      </details>
 
       {message ? <div className="panel border-emerald-400/30 bg-emerald-400/10 text-emerald-100">{message}</div> : null}
       {error ? <div className="panel border-rose-400/35 bg-rose-400/10 text-rose-100">{error}</div> : null}

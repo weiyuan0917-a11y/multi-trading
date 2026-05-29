@@ -11,7 +11,10 @@ from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo
 
 from api.brokers import service_layer as broker_service
-from fee_model import estimate_us_option_multi_leg_fee, estimate_us_option_order_fee
+try:
+    from .fee_model import estimate_us_option_multi_leg_fee, estimate_us_option_order_fee
+except ImportError:
+    from fee_model import estimate_us_option_multi_leg_fee, estimate_us_option_order_fee
 
 
 OptionSide = Literal["buy", "sell"]

@@ -16,7 +16,10 @@ from urllib.parse import quote as url_quote
 import requests
 
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.abspath(
+    os.getenv("MULTITRADING_ROOT")
+    or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 KLINE_CACHE_DIR = os.path.join(ROOT, "data", "klines")
 LAST_GOOD_CACHE_DIR = os.path.join(ROOT, "data", "market_cache", "public_quotes")
 

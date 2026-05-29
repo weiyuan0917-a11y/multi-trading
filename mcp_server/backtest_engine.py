@@ -9,7 +9,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Literal, Optional
 import math
-from fee_model import estimate_stock_order_fee
+try:
+    from .fee_model import estimate_stock_order_fee
+except ImportError:
+    from fee_model import estimate_stock_order_fee
 
 
 # ============================================================

@@ -7,7 +7,7 @@ from typing import Any
 
 from config.env_loader import load_project_env
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[1]).resolve()
 load_project_env(_ROOT)
 
 

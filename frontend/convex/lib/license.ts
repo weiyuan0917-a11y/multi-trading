@@ -106,16 +106,16 @@ function pemToPkcs8Der(privateKeyPem: string) {
   return base64ToBytes(body);
 }
 
-async function rsaPssSha256Base64(privateKeyPem: string, payload: string) {
+async function rsaPkcs1Sha256Base64(privateKeyPem: string, payload: string) {
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "pkcs8",
     pemToPkcs8Der(privateKeyPem),
-    { name: "RSA-PSS", hash: "SHA-256" },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["sign"]
   );
-  const signature = await crypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, key, encoder.encode(payload));
+  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(payload));
   return arrayBufferToBase64(signature);
 }
 
@@ -179,7 +179,7 @@ export async function createSignedLocalLicense({
   const admin = Boolean(isAdmin) || cleanRole === "admin" || cleanRole === "owner";
   const issuedAt = new Date(nowMs).toISOString();
   const subscriptionPeriodEnd = normalizePeriodEndMs(currentPeriodEnd);
-  const signatureAlg = privateKeyPem ? "rsa-pss-sha256" : "hmac-sha256";
+  const signatureAlg = privateKeyPem ? "rsassa-pkcs1-v1_5-sha256" : "hmac-sha256";
   const unsignedLicense = {
     owner_id: assertOwnerId(ownerId),
     plan: admin ? "premium" : cleanPlan,
@@ -196,7 +196,7 @@ export async function createSignedLocalLicense({
     signature_kid: signatureKid || undefined,
   };
   const signature = privateKeyPem
-    ? `rsa-pss-sha256=${await rsaPssSha256Base64(privateKeyPem, stableJson(unsignedLicense))}`
+    ? `rsassa-pkcs1-v1_5-sha256=${await rsaPkcs1Sha256Base64(privateKeyPem, stableJson(unsignedLicense))}`
     : `sha256=${await hmacSha256Hex(secret, stableJson(unsignedLicense))}`;
   const license = { ...unsignedLicense, signature } as SignedLocalLicense;
   return { license, issuedAt, expiresAt: license.expires_at };

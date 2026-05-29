@@ -26,7 +26,7 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 
 def load_project_env(project_root: Path | None = None, override: bool = False) -> dict[str, str]:
-    root = (project_root or Path(__file__).resolve().parents[1]).resolve()
+    root = (project_root or Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[1])).resolve()
     env_path = root / ".env"
     cache_key = str(env_path).lower()
     if cache_key in _LOADED_ENV_FILES and not override:

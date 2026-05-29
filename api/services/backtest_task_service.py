@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
 _TASKS: dict[str, dict[str, Any]] = {}
-_ROOT = Path(__file__).resolve().parents[2]
+_ROOT = Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[2]).resolve()
 _STORE_PATH = _ROOT / "data" / "backtests" / "unified_backtests.json"
 
 

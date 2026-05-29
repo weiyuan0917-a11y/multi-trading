@@ -2,21 +2,38 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Header, Query, HTTPException
 
 from api import runtime_bridge as rt
+from api.routers.local_owner import require_local_owner
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
 
 @router.get("/providers/status")
-def market_data_provider_status() -> dict[str, Any]:
-    return rt.market_data_provider_status()
+def market_data_provider_status(
+    authorization: str | None = Header(default=None),
+    x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner"),
+) -> dict[str, Any]:
+    owner = ""
+    try:
+        owner = require_local_owner(authorization, x_local_owner)
+    except HTTPException:
+        owner = ""
+    return rt.market_data_provider_status(owner_id=owner)
 
 
 @router.get("/public/providers/status")
-def public_market_data_provider_status() -> dict[str, Any]:
-    return rt.public_market_data_provider_status()
+def public_market_data_provider_status(
+    authorization: str | None = Header(default=None),
+    x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner"),
+) -> dict[str, Any]:
+    owner = ""
+    try:
+        owner = require_local_owner(authorization, x_local_owner)
+    except HTTPException:
+        owner = ""
+    return rt.public_market_data_provider_status(owner_id=owner)
 
 
 @router.get("/quote")

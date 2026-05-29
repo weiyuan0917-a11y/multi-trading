@@ -18,13 +18,16 @@ from typing import Any, Literal, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.abspath(
+    os.getenv("MULTITRADING_ROOT")
+    or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 MCP_DIR = os.path.join(ROOT, "mcp_server")
 # 回测中心：服务器本地 K 线缓存（分批拉取合并后写入，供 compare 直接读取）
 KLINE_SERVER_CACHE_DIR = os.path.join(ROOT, "data", "klines")
@@ -83,6 +86,7 @@ from api.auto_trader import (
     summarize_legacy_unscoped_signals,
 )
 from api.routers.local_owner import (
+    require_local_owner,
     require_local_identity,
     reset_local_identity_header_context,
     set_local_identity_header_context,
@@ -367,6 +371,17 @@ def _win_subprocess_silent_kwargs() -> dict[str, Any]:
         "creationflags": subprocess.CREATE_NO_WINDOW,
         "startupinfo": startupinfo,
     }
+
+
+def _worker_launch_cmd(worker: str, *args: str) -> list[str]:
+    backend_exe = os.path.join(ROOT, "Backend.exe")
+    if os.path.isfile(backend_exe):
+        return [backend_exe, f"--worker={worker}", *[str(a) for a in args if str(a)]]
+    script_map: dict[str, str] = {}
+    script = script_map.get(worker)
+    if not script:
+        raise ValueError(f"unknown worker: {worker}")
+    return [sys.executable, "-u", script, *[str(a) for a in args if str(a)]]
 
 
 def _is_main_process_runtime() -> bool:
@@ -775,6 +790,35 @@ def _list_python_pids_by_script(script_name: str) -> list[int]:
     if os.name != "nt":
         return []
     pids: set[int] = set()
+    exe_worker = {
+        "auto_trader_supervisor.py": "auto_trader_supervisor",
+        "auto_trader_worker.py": "auto_trader_worker",
+        "qqq_0dte_live_worker.py": "qqq_live_worker",
+        "stock_options_swing_worker.py": "stock_options_swing_worker",
+    }.get(script_name)
+    if exe_worker:
+        try:
+            where = "name='Backend.exe' and CommandLine like '%--worker=" + exe_worker + "%'"
+            out = subprocess.check_output(  # noqa: S603
+                ["wmic", "process", "where", where, "get", "ProcessId", "/value"],
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                stderr=subprocess.DEVNULL,
+                timeout=2.5,
+                **_win_subprocess_silent_kwargs(),
+            )
+            for line in out.splitlines():
+                line = line.strip()
+                if not line.startswith("ProcessId="):
+                    continue
+                raw = line.split("=", 1)[-1].strip()
+                if raw.isdigit():
+                    pid = int(raw)
+                    if pid > 0 and pid != os.getpid():
+                        pids.add(pid)
+        except Exception:
+            pass
     # 兼容 python.exe / python3.exe / pythonw.exe 及带版本后缀的可执行文件名。
     for img in (
         "python.exe",
@@ -837,17 +881,22 @@ def _is_auto_trader_script_pid(pid: Optional[int]) -> bool:
     cmd = _pid_commandline(pid)
     if not cmd:
         return False
-    return ("auto_trader_worker.py" in cmd) or ("auto_trader_supervisor.py" in cmd)
+    return (
+        ("auto_trader_worker.py" in cmd)
+        or ("auto_trader_supervisor.py" in cmd)
+        or ("--worker=auto_trader_worker" in cmd)
+        or ("--worker=auto_trader_supervisor" in cmd)
+    )
 
 
 def _is_stock_options_swing_worker_script_pid(pid: Optional[int]) -> bool:
     cmd = _pid_commandline(pid)
-    return bool(cmd and "stock_options_swing_worker.py" in cmd)
+    return bool(cmd and ("stock_options_swing_worker.py" in cmd or "--worker=stock_options_swing_worker" in cmd))
 
 
 def _qqq_live_worker_cmd_instance(cmd: str) -> Optional[str]:
     """解析 qqq_0dte_live_worker 命令行中的 --instance；未传参时视为 0dte（与脚本默认一致）。"""
-    if "qqq_0dte_live_worker.py" not in cmd:
+    if "qqq_0dte_live_worker.py" not in cmd and "--worker=qqq_live_worker" not in cmd:
         return None
     lower = cmd.lower()
     m = re.search(r"--instance(?:=|\s+)([a-z0-9_-]+)", lower)
@@ -1005,6 +1054,7 @@ def _resolve_worker_account_context(owner_id: str | None, account_id: str | None
 
 
 def _start_auto_trader_worker(owner_id: str | None = None) -> str:
+    return "auto_trading_removed"
     with _AUTO_TRADER_PROCESS_OP_LOCK:
         _cleanup_orphan_auto_trader_processes()
         running_supervisors = _list_python_pids_by_script("auto_trader_supervisor.py")
@@ -1023,6 +1073,7 @@ def _start_auto_trader_worker(owner_id: str | None = None) -> str:
         _remove_file_silent(AUTO_TRADER_SUPERVISOR_STOP_FILE)
         env = os.environ.copy()
         env["PYTHONPATH"] = ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["MULTITRADING_ROOT"] = ROOT
         owner = str(owner_id or os.getenv("AUTO_TRADER_OWNER_ID") or os.getenv("X_MT_LOCAL_OWNER") or "").strip().lower()
         if not owner:
             return "rejected_missing_owner"
@@ -1041,9 +1092,8 @@ def _start_auto_trader_worker(owner_id: str | None = None) -> str:
                 return "rejected_legacy_unscoped_signals"
         except Exception:
             return "rejected_signal_scope_check_failed"
-        script = os.path.join(ROOT, "api", "auto_trader_supervisor.py")
         _managed_processes["auto_trader_supervisor"] = subprocess.Popen(  # noqa: S603
-            [sys.executable, "-u", script],
+            _worker_launch_cmd("auto_trader_supervisor"),
             cwd=ROOT,
             env=env,
             **_win_subprocess_silent_kwargs(),
@@ -1109,6 +1159,7 @@ def _sync_auto_trader_worker_with_config(cfg: dict[str, Any], owner_id: str | No
     使独立 Worker/Supervisor 与 auto_trader_config.enabled 一致。
     此前仅「Setup 启动服务」会拉起进程，用户在自动交易页打开开关并保存配置时 Worker 不会启动，导致 runtime 长期不更新。
     """
+    return {"worker_supervisor": "auto_trading_removed"}
     out: dict[str, str] = {}
     trader = _auto_trader_service_for_owner(owner_id)
     if bool(cfg.get("enabled")):
@@ -1466,6 +1517,7 @@ def _start_qqq_live_worker(instance: str, owner_id: str | None = None) -> str:
         _remove_file_silent(stop_file)
         env = os.environ.copy()
         env["PYTHONPATH"] = ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["MULTITRADING_ROOT"] = ROOT
         env["QQQ_LIVE_WORKER_INSTANCE"] = instance
         env["QQQ_LIVE_WORKER_CONFIG"] = cfg_path
         env["QQQ_0DTE_LIVE_CONFIG"] = cfg_path
@@ -1479,9 +1531,8 @@ def _start_qqq_live_worker(instance: str, owner_id: str | None = None) -> str:
                 env["QQQ_LIVE_ACCOUNT_ID"] = account_ctx["account_id"]
             if account_ctx.get("broker_provider"):
                 env["QQQ_LIVE_BROKER_PROVIDER"] = account_ctx["broker_provider"]
-        script = os.path.join(ROOT, "api", "qqq_0dte_live_worker.py")
         _managed_processes[managed_key] = subprocess.Popen(  # noqa: S603
-            [sys.executable, "-u", script, f"--instance={instance}"],
+            _worker_launch_cmd("qqq_live_worker", f"--instance={instance}"),
             cwd=ROOT,
             env=env,
             **_win_subprocess_silent_kwargs(),
@@ -1503,11 +1554,11 @@ def _start_qqq_live_worker(instance: str, owner_id: str | None = None) -> str:
 
 
 def _start_qqq_0dte_live_worker(owner_id: str | None = None) -> str:
-    return _start_qqq_live_worker("0dte", owner_id=owner_id)
+    return "auto_trading_removed"
 
 
 def _start_qqq_1dte_live_worker(owner_id: str | None = None) -> str:
-    return _start_qqq_live_worker("1dte", owner_id=owner_id)
+    return "auto_trading_removed"
 
 
 def _stop_qqq_live_worker(instance: str, timeout_seconds: float = 5.0) -> str:
@@ -1557,6 +1608,7 @@ def _stop_qqq_1dte_live_worker(timeout_seconds: float = 5.0) -> str:
 
 
 def _start_stock_options_swing_worker(owner_id: str | None = None) -> str:
+    return "auto_trading_removed"
     owner = str(owner_id or "").strip().lower()
     managed_key = "stock_options_swing_worker"
     cfg_path = os.path.join(ROOT, "data", "stock_options_swing", "live_worker_config.json")
@@ -1582,6 +1634,7 @@ def _start_stock_options_swing_worker(owner_id: str | None = None) -> str:
         _remove_file_silent(STOCK_OPTIONS_SWING_WORKER_STOP_FILE)
         env = os.environ.copy()
         env["PYTHONPATH"] = ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["MULTITRADING_ROOT"] = ROOT
         env["STOCK_OPTIONS_SWING_CONFIG"] = cfg_path
         if owner:
             env["STOCK_OPTIONS_SWING_OWNER_ID"] = owner
@@ -1593,9 +1646,8 @@ def _start_stock_options_swing_worker(owner_id: str | None = None) -> str:
                 env["STOCK_OPTIONS_SWING_ACCOUNT_ID"] = account_ctx["account_id"]
             if account_ctx.get("broker_provider"):
                 env["STOCK_OPTIONS_SWING_BROKER_PROVIDER"] = account_ctx["broker_provider"]
-        script = os.path.join(ROOT, "api", "stock_options_swing_worker.py")
         _managed_processes[managed_key] = subprocess.Popen(  # noqa: S603
-            [sys.executable, "-u", script],
+            _worker_launch_cmd("stock_options_swing_worker"),
             cwd=ROOT,
             env=env,
             **_win_subprocess_silent_kwargs(),
@@ -1840,6 +1892,7 @@ ENV_VAR_MAP = {
     "polygon_api_key": "POLYGON_API_KEY",
     "twelve_data_api_key": "TWELVE_DATA_API_KEY",
     "fred_api_key": "FRED_API_KEY",
+    "fmp_api_key": "FMP_API_KEY",
     "coingecko_api_key": "COINGECKO_API_KEY",
     "openclaw_mcp_max_level": "OPENCLAW_MCP_MAX_LEVEL",
     "openclaw_mcp_allow_l3": "OPENCLAW_MCP_ALLOW_L3",
@@ -4412,6 +4465,7 @@ def _compute_research_snapshot_job(
             trace_id=str(trace_id or ""),
             selected_symbols=list(selected_symbols or []),
             run_openbb=bool(opts.get("run_openbb", True)),
+            openbb_modules=opts.get("openbb_modules") if isinstance(opts.get("openbb_modules"), dict) else None,
             run_tradingagents=bool(opts.get("run_tradingagents", True)),
             run_pair_backtest=bool(opts.get("run_pair_backtest", True)),
             run_ml_diagnostics=bool(opts.get("run_ml_diagnostics", True)),
@@ -5084,15 +5138,137 @@ def ops_restarts_recent(limit: int = 20) -> dict[str, Any]:
 
 
 @app.get("/research/external/openbb/health")
-def research_external_openbb_health() -> dict[str, Any]:
+def research_external_openbb_health(
+    authorization: str | None = Header(default=None),
+    x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner"),
+) -> dict[str, Any]:
+    try:
+        owner = require_local_owner(authorization, x_local_owner)
+    except HTTPException:
+        owner = ""
+    if owner:
+        try:
+            from config.user_env_store import apply_light_session_env_for_user
+
+            apply_light_session_env_for_user(owner, Path(ROOT))
+        except Exception:
+            pass
     cli = OpenBBClient()
     return {"ok": True, "provider": "openbb", "health": cli.ensure_available()}
+
+
+@app.get("/research/external/openbb/diagnostics")
+def research_external_openbb_diagnostics(
+    authorization: str | None = Header(default=None),
+    x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner"),
+) -> dict[str, Any]:
+    try:
+        owner = require_local_owner(authorization, x_local_owner)
+    except HTTPException:
+        owner = ""
+    if owner:
+        try:
+            from config.user_env_store import apply_light_session_env_for_user
+
+            apply_light_session_env_for_user(owner, Path(ROOT))
+        except Exception:
+            pass
+    cli = OpenBBClient()
+    return {"ok": True, "provider": "openbb", "diagnostics": cli.provider_capability_probe()}
+
+
+@app.post("/research/external/openbb/restart")
+def research_external_openbb_restart(
+    body: dict[str, Any] | None = Body(default=None),
+    authorization: str | None = Header(default=None),
+    x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner"),
+) -> dict[str, Any]:
+    owner = require_local_owner(authorization, x_local_owner)
+    try:
+        from config.user_env_store import apply_light_session_env_for_user
+
+        apply_light_session_env_for_user(owner, Path(ROOT))
+    except Exception:
+        pass
+    clear_cache = str((body or {}).get("clear_cache", "true")).strip().lower() not in {"0", "false", "no", "off"}
+    cli = OpenBBClient()
+    return {"ok": True, "provider": "openbb", "restart": cli.restart(clear_cache=clear_cache)}
 
 
 @app.get("/research/external/openbb/market-regime")
 def research_external_openbb_market_regime(market: str = "us") -> dict[str, Any]:
     cli = OpenBBClient()
     row = cli.market_regime(market=market)
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/macro")
+def research_external_openbb_macro() -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.macro_indicators()
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/macro-regime")
+def research_external_openbb_macro_regime() -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.macro_regime()
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/sec-filings")
+def research_external_openbb_sec_filings(symbol: str, limit: int = 5) -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.sec_filings(symbol=symbol, limit=limit)
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/insider-trading")
+def research_external_openbb_insider_trading(symbol: str, limit: int = 5) -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.sec_insider_trading(symbol=symbol, limit=limit)
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/sec-disclosure")
+def research_external_openbb_sec_disclosure(symbol: str, limit: int = 5) -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.sec_disclosure_summary(symbol=symbol, limit=limit)
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/etf-exposure")
+def research_external_openbb_etf_exposure(symbol: str, holdings_limit: int = 10) -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.etf_exposure_summary(symbol=symbol, holdings_limit=holdings_limit)
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/options-summary")
+def research_external_openbb_options_summary(symbol: str = "QQQ", top: int = 10) -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.options_chain_summary(symbol=symbol, top=top)
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/futures-curve")
+def research_external_openbb_futures_curve(symbol: str = "NQ") -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.futures_curve(symbol=symbol)
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/cftc-cot")
+def research_external_openbb_cftc_cot(cftc_id: str = "209742", report_type: str = "financial", days: int = 180) -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.cftc_cot_summary(cftc_id=cftc_id, report_type=report_type, days=days)
+    return {"ok": True, "provider": "openbb", "item": row}
+
+
+@app.get("/research/external/openbb/derivatives-risk")
+def research_external_openbb_derivatives_risk(symbol: str = "QQQ") -> dict[str, Any]:
+    cli = OpenBBClient()
+    row = cli.derivatives_risk_summary(symbol=symbol)
     return {"ok": True, "provider": "openbb", "item": row}
 
 
@@ -5243,6 +5419,7 @@ def auto_trader_research_run(body: Optional[AutoTraderResearchRunBody] = None) -
             selected_symbols.append(sym)
     research_options = {
         "run_openbb": bool(body.run_openbb) if body and body.run_openbb is not None else True,
+        "openbb_modules": dict(body.openbb_modules) if body and isinstance(body.openbb_modules, dict) else None,
         "run_tradingagents": bool(body.run_tradingagents) if body and body.run_tradingagents is not None else True,
         "run_pair_backtest": bool(body.run_pair_backtest) if body and body.run_pair_backtest is not None else True,
         "run_ml_diagnostics": bool(body.run_ml_diagnostics) if body and body.run_ml_diagnostics is not None else True,

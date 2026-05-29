@@ -13,7 +13,10 @@ from api.notification_preferences import (
 
 router = APIRouter(tags=["notifications"])
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.abspath(
+    os.getenv("MULTITRADING_ROOT")
+    or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 MCP_DIR = os.path.join(ROOT, "mcp_server")
 
 

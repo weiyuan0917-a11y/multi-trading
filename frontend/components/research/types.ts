@@ -10,6 +10,14 @@ export type ResearchStatus = {
     openbb_enabled?: boolean;
     openbb_connected?: boolean;
     openbb_base_url?: string;
+    openbb_modules?: Record<string, boolean>;
+    openbb_macro_available?: boolean;
+    openbb_macro_regime?: string;
+    openbb_sec_available?: boolean;
+    openbb_sec_symbols?: number;
+    openbb_etf_available?: boolean;
+    openbb_etf_symbols?: number;
+    openbb_derivatives_available?: boolean;
     cn_public_data?: CnPublicDataStatus;
     tradingagents_enabled?: boolean;
     tradingagents_provider?: string | null;
@@ -64,6 +72,14 @@ export type ResearchSnapshot = {
       openbb_enabled?: boolean;
       openbb_connected?: boolean;
       openbb_base_url?: string;
+      openbb_modules?: Record<string, boolean>;
+      openbb_macro_available?: boolean;
+      openbb_macro_regime?: string;
+      openbb_sec_available?: boolean;
+      openbb_sec_symbols?: number;
+      openbb_etf_available?: boolean;
+      openbb_etf_symbols?: number;
+      openbb_derivatives_available?: boolean;
       cn_public_data?: CnPublicDataStatus;
     };
     external_research?: {
@@ -79,6 +95,132 @@ export type ResearchSnapshot = {
         };
         note?: string;
         reason?: string;
+      };
+      macro_regime?: {
+        available?: boolean;
+        regime?: string;
+        confidence?: number;
+        risk_score?: number;
+        as_of?: string;
+        features?: {
+          dgs10?: number | null;
+          dgs2?: number | null;
+          spread_10y2y?: number | null;
+          dgs10_change_60?: number | null;
+          fedfunds?: number | null;
+          financial_stress?: number | null;
+          unrate_change_60?: number | null;
+          cpi_yoy?: number | null;
+        };
+        reasons?: string[];
+        note?: string;
+        reason?: string;
+      };
+      macro_indicators?: Record<string, any>;
+      sec_disclosures?: Array<{
+        symbol?: string;
+        available?: boolean;
+        important_count?: number;
+        filings?: {
+          count?: number;
+          important_count?: number;
+          items?: Array<{
+            filing_date?: string;
+            report_type?: string;
+            description?: string;
+            report_url?: string;
+            filing_detail_url?: string;
+            important?: boolean;
+          }>;
+        };
+        insider_trading?: {
+          count?: number;
+          important_count?: number;
+          items?: Array<{
+            filing_date?: string;
+            transaction_date?: string;
+            owner_name?: string;
+            owner_title?: string;
+            acquisition_or_disposition?: string;
+            securities_transacted?: number | null;
+            transaction_value?: number | null;
+            filing_url?: string;
+            important?: boolean;
+          }>;
+        };
+      }>;
+      etf_exposures?: Array<{
+        symbol?: string;
+        available?: boolean;
+        info?: {
+          available?: boolean;
+          provider?: string;
+          info?: {
+            symbol?: string;
+            name?: string;
+            category?: string;
+            total_assets?: number;
+            trailing_pe?: number | null;
+            dividend_yield?: number | null;
+            return_ytd?: number | null;
+            beta_3y_avg?: number | null;
+            ma_50d?: number | null;
+            ma_200d?: number | null;
+          };
+        };
+        sectors?: {
+          available?: boolean;
+          count?: number;
+          reason?: string;
+          items?: Array<{ symbol?: string; name?: string; weight?: number | null }>;
+        };
+        holdings?: {
+          available?: boolean;
+          count?: number;
+          reason?: string;
+          items?: Array<{ symbol?: string; name?: string; weight?: number | null }>;
+        };
+      }>;
+      derivatives_risk?: {
+        symbol?: string;
+        available?: boolean;
+        options?: {
+          available?: boolean;
+          underlying_price?: number | null;
+          total_contracts?: number;
+          nearest_expiration?: string;
+          nearest_dte?: number | null;
+          near_dte_contracts?: number;
+          put_call_volume_ratio?: number | null;
+          put_call_oi_ratio?: number | null;
+          top_volume?: Array<{
+            contract_symbol?: string;
+            expiration?: string;
+            dte?: number;
+            strike?: number;
+            option_type?: string;
+            volume?: number;
+            open_interest?: number;
+            implied_volatility?: number;
+          }>;
+        };
+        futures_curve?: {
+          available?: boolean;
+          symbol?: string;
+          count?: number;
+          curve_spread?: number | null;
+          items?: Array<{ expiration?: string; price?: number }>;
+        };
+        cot?: {
+          available?: boolean;
+          date?: string;
+          market?: string;
+          open_interest?: number | null;
+          leveraged_money_net?: number | null;
+          asset_manager_net?: number | null;
+          leveraged_money_net_oi?: number | null;
+          asset_manager_net_oi?: number | null;
+        };
       };
       symbol_factors?: Array<{
         symbol?: string;
@@ -118,6 +260,8 @@ export type ResearchSnapshot = {
       symbol?: string;
       weight_raw?: number;
       weight?: number;
+      weight_pre_external_risk?: number;
+      external_risk_multiplier?: number;
       strength_score?: number;
       price_type?: string;
     }>;
@@ -141,6 +285,28 @@ export type ResearchSnapshot = {
       max_single_ratio?: number;
       target_gross_exposure?: number;
       effective_exposure?: number;
+      formula?: string;
+    };
+    external_risk_notes?: Array<{
+      severity?: "info" | "warn" | "risk" | string;
+      source?: string;
+      title?: string;
+      message?: string;
+      symbols?: string[];
+      reasons?: string[];
+      score?: number;
+    }>;
+    external_risk_gating?: {
+      enabled?: boolean;
+      applied?: boolean;
+      risk_count?: number;
+      warn_count?: number;
+      reduction?: number;
+      multiplier?: number;
+      max_reduction?: number;
+      effective_exposure_before?: number;
+      effective_exposure_after?: number;
+      reason?: string;
       formula?: string;
     };
     factor_gating?: {

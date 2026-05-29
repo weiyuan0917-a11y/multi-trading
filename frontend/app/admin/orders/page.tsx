@@ -115,6 +115,18 @@ function friendlyError(message: string) {
 }
 
 export default function AdminOrdersPage() {
+  if (process.env.NEXT_PUBLIC_MT_BUILD_TARGET === "customer") {
+    return (
+      <PageShell>
+        <div className="panel space-y-3 border-slate-700 bg-slate-950/40 text-sm text-slate-300">
+          <div className="text-xl font-semibold text-slate-50">收款订单</div>
+          <p>客户安装包不包含管理员收款订单功能。</p>
+          该功能仅保留在管理员版本中。
+        </div>
+      </PageShell>
+    );
+  }
+
   const entitlements = useEntitlements();
   const [rows, setRows] = useState<ManualOrder[]>([]);
   const [query, setQuery] = useState("");

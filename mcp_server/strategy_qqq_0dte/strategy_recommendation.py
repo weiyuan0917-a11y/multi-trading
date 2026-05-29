@@ -11,7 +11,10 @@ from collections import defaultdict
 from datetime import date, datetime, time, timezone
 from typing import Any, Sequence
 
-from backtest_engine import Bar
+try:
+    from mcp_server.backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
 from .config import Qqq0dteConfig
 from .session_us import get_zone, ny_date, to_ny

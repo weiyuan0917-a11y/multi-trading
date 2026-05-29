@@ -1,7 +1,5 @@
 # API Refactor Baseline
 
-> Historical snapshot. This document records a route baseline from the earlier `api/main.py` refactor and is not the current product feature inventory. For the current module list, see `docs/current-features.md`.
-
 ## Scope
 
 This baseline captures route and contract checkpoints before splitting `api/main.py`.

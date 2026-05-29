@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-_ROOT = Path(__file__).resolve().parents[2]
+_ROOT = Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[2]).resolve()
 _DEFAULT_AUDIT_FILE = _ROOT / "logs" / "trade_audit.jsonl"
 _IDEMPOTENCY_LOCK = threading.RLock()
 _RECENT_ORDER_KEYS: dict[str, float] = {}

@@ -18,13 +18,11 @@ from .config import Qqq0dteConfig
 from .controller import StrategyController
 from .monitoring import CircuitBreakerState
 from .oms_adapter import intent_to_legs_template
-from .runner_live import Qqq0dteLiveSession
 from .state import TradeIntent, TradeIntentKind
 
 __all__ = [
     "CircuitBreakerState",
     "Qqq0dteConfig",
-    "Qqq0dteLiveSession",
     "StrategyController",
     "TradeIntent",
     "TradeIntentKind",

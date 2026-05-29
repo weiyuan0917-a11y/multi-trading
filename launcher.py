@@ -84,11 +84,18 @@ def _resolve_root() -> Path:
     if not getattr(sys, "frozen", False):
         return Path(__file__).resolve().parent
 
-    # Running as PyInstaller EXE: executable usually lives in <root>/dist.
+    # Running as PyInstaller EXE. Developer builds usually live in <root>/dist,
+    # while customer installs place the launcher directly beside Backend.exe and
+    # a compiled Next standalone frontend.
     exe_dir = Path(sys.executable).resolve().parent
     candidates = [exe_dir, exe_dir.parent]
     for c in candidates:
-        if (c / "frontend").exists() and (c / "api").exists():
+        frontend_ok = (c / "frontend").exists()
+        backend_ok = (c / "api").exists() or (c / "Backend.exe").exists()
+        standalone_ok = (c / "frontend" / "server.js").exists()
+        if frontend_ok and backend_ok:
+            return c
+        if standalone_ok and backend_ok:
             return c
     return exe_dir
 
@@ -115,6 +122,9 @@ from runtime_process_utils import read_pid_file as _read_pid_file
 
 API_PORT = int(str(os.getenv("LONGPORT_API_PORT", "8010") or "8010"))
 FRONTEND_DIR = ROOT / "frontend"
+BACKEND_EXE = ROOT / "Backend.exe"
+FRONTEND_STANDALONE_SERVER = FRONTEND_DIR / "server.js"
+CUSTOMER_NODE_EXE = ROOT / "runtime" / "node" / "node.exe"
 WATCHDOG_PID_FILE = ROOT / ".backend_watchdog.pid"
 WATCHDOG_PAUSE_FILE = ROOT / ".backend_watchdog.pause"
 WATCHDOG_LOG_FILE = ROOT / "launcher_watchdog.log"
@@ -330,6 +340,18 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _frontend_standalone_available() -> bool:
+    return FRONTEND_STANDALONE_SERVER.exists() and FRONTEND_STANDALONE_SERVER.is_file()
+
+
+def _customer_runtime_available() -> bool:
+    return (
+        str(os.getenv("MT_BUILD_TARGET", "")).strip().lower() == "customer"
+        or BACKEND_EXE.exists()
+        or _frontend_standalone_available()
+    )
+
+
 def _stop_auto_trader_worker_via_api() -> bool:
     """
     尝试通过 API 优雅停止 auto_trader worker/supervisor 与 QQQ 实盘 Worker（0DTE / 1DTE）：
@@ -393,6 +415,13 @@ def _frontend_source_hash() -> str:
     计算前端关键源码哈希，作为“页面版本标记”。
     覆盖 app/components/lib + 关键配置文件，确保任意页面变更都可被感知。
     """
+    if _frontend_standalone_available():
+        try:
+            stat = FRONTEND_STANDALONE_SERVER.stat()
+            return _sha256_bytes(f"{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8"))
+        except Exception:
+            return "customer-standalone"
+
     roots = [FRONTEND_DIR / "app", FRONTEND_DIR / "components", FRONTEND_DIR / "lib"]
     exts = {".ts", ".tsx", ".js", ".jsx", ".css", ".json"}
     files: list[Path] = []
@@ -446,6 +475,8 @@ def _write_text_file(path: Path, content: str) -> None:
 
 
 def _frontend_build_ready() -> bool:
+    if _frontend_standalone_available():
+        return True
     return (FRONTEND_DIR / ".next" / "BUILD_ID").exists()
 
 
@@ -623,6 +654,8 @@ def _is_backend_cmdline(cmdline: str) -> bool:
     if not c:
         return False
     # 兼容 api.main:app / 引号路径 / 通过 -m uvicorn 启动
+    if "backend.exe" in c or "multitradingbackend" in c:
+        return True
     if "uvicorn" in c and "api.main" in c:
         return True
     if ("longportlauncher" in c or "multitradinglauncher" in c) and "api.main" in c:
@@ -635,7 +668,8 @@ def _is_backend_cmdline(cmdline: str) -> bool:
 def _is_frontend_cmdline(cmdline: str) -> bool:
     c = str(cmdline or "").lower()
     return (
-        ("next" in c and ("start" in c or "dev" in c))
+        ("server.js" in c and "frontend" in c and ("node.exe" in c or "node" in c))
+        or ("next" in c and ("start" in c or "dev" in c))
         or ("next-server" in c or "next_server" in c)
         or ("next\\dist\\server\\lib\\start-server.js" in c)
         or ("next/dist/server/lib/start-server.js" in c)
@@ -884,6 +918,16 @@ def _get_npm_cmd() -> str:
     return npm
 
 
+def _get_node_cmd() -> str:
+    for candidate in (CUSTOMER_NODE_EXE, ROOT / "node.exe"):
+        if candidate.exists() and candidate.is_file():
+            return str(candidate)
+    node = shutil.which("node.exe") or shutil.which("node")
+    if not node:
+        raise RuntimeError("未找到 node.exe。客户版安装目录应包含 runtime\\node\\node.exe；开发模式请安装 Node.js。")
+    return node
+
+
 def _read_text_tail(path: Path, max_lines: int = 45) -> str:
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
@@ -965,6 +1009,60 @@ def _start_frontend_dev_server(
 
     print(f"[INFO] 前端进程日志文件: {LAUNCHER_FRONTEND_LOG_FILE}")
     print(f"[INFO] 前端启动命令: {cmd_list!r}")
+
+    return subprocess.Popen(  # noqa: S603
+        cmd_list,
+        cwd=str(FRONTEND_DIR),
+        env=env_fe,
+        stdout=log_append,
+        stderr=subprocess.STDOUT,
+        creationflags=flags,
+        startupinfo=startupinfo,
+    )
+
+
+def _start_frontend_standalone_server(
+    node_cmd: str,
+    web_port: int,
+    env: dict[str, str],
+) -> subprocess.Popen[bytes]:
+    env_fe = env.copy()
+    env_fe["PORT"] = str(int(web_port))
+    env_fe["HOSTNAME"] = "127.0.0.1"
+    env_fe.setdefault("NODE_ENV", "production")
+    env_fe.setdefault("NEXT_TELEMETRY_DISABLED", "1")
+
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        LAUNCHER_FRONTEND_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LAUNCHER_FRONTEND_LOG_FILE, "a", encoding="utf-8", errors="replace") as lf:
+            lf.write("\n" + "=" * 72 + "\n")
+            lf.write(
+                f"[{ts}] cwd={FRONTEND_DIR} node_cmd={node_cmd!r} standalone={FRONTEND_STANDALONE_SERVER} port={web_port}\n"
+            )
+            lf.flush()
+    except Exception:
+        pass
+
+    log_append = open(LAUNCHER_FRONTEND_LOG_FILE, "a", encoding="utf-8", errors="replace")
+    cmd_list = [str(node_cmd), str(FRONTEND_STANDALONE_SERVER)]
+
+    flags = 0
+    startupinfo = None
+    if os.name == "nt":
+        if _to_bool(os.getenv("LONGPORT_CHILD_NEW_CONSOLE", ""), default=False):
+            flags = subprocess.CREATE_NEW_CONSOLE
+        else:
+            flags = (
+                subprocess.CREATE_NO_WINDOW
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.DETACHED_PROCESS
+            )
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    print(f"[INFO] 前端进程日志文件: {LAUNCHER_FRONTEND_LOG_FILE}")
+    print(f"[INFO] 前端 standalone 启动命令: {cmd_list!r}")
 
     return subprocess.Popen(  # noqa: S603
         cmd_list,
@@ -1192,6 +1290,8 @@ def _backend_busy_active() -> bool:
 
 
 def _backend_cmd(python_cmd: list[str], dev_mode: bool = False) -> list[str]:
+    if BACKEND_EXE.exists() and BACKEND_EXE.is_file() and not dev_mode:
+        return [str(BACKEND_EXE), f"--host={LAUNCHER_UVICORN_HOST}", f"--port={API_PORT}"]
     if _is_embedded_backend_python_cmd(python_cmd):
         cmd = [*python_cmd, f"--host={LAUNCHER_UVICORN_HOST}", f"--port={API_PORT}"]
         if dev_mode:
@@ -1431,6 +1531,9 @@ def _start_backend_watchdog() -> None:
         return
     env = _subprocess_env_with_user_secrets(os.environ.copy())
     env["PYTHONPATH"] = str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env.setdefault("MULTITRADING_ROOT", str(ROOT))
+    if _customer_runtime_available():
+        env.setdefault("MT_BUILD_TARGET", "customer")
     if getattr(sys, "frozen", False):
         cmd = [sys.executable, "--backend-watchdog"]
     else:
@@ -1489,6 +1592,9 @@ def run_backend_watchdog() -> int:
 
     env = _subprocess_env_with_user_secrets(os.environ.copy())
     env["PYTHONPATH"] = str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env.setdefault("MULTITRADING_ROOT", str(ROOT))
+    if _customer_runtime_available():
+        env.setdefault("MT_BUILD_TARGET", "customer")
     dev_mode = os.getenv("LONGPORT_DEV", "").strip() == "1"
     python_cmd = _get_python_cmd()
     cmd = _backend_cmd(python_cmd, dev_mode=dev_mode)
@@ -1627,7 +1733,7 @@ def run_backend_watchdog() -> int:
                 fail_count=fail_count,
                 pid_before=pid_before,
             )
-            p = _start_background_process(cmd, ROOT, env)
+            p = _start_backend_logged(cmd, ROOT, env)
             _watchdog_log_event(
                 event="restart_success",
                 message=f"backend restarted pid={p.pid}",
@@ -1784,11 +1890,17 @@ def main() -> int:
     env = _subprocess_env_with_user_secrets(os.environ.copy())
     _augment_path_for_gui_launch(env)
     env["PYTHONPATH"] = str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env.setdefault("MULTITRADING_ROOT", str(ROOT))
     dev_mode = os.getenv("LONGPORT_DEV", "").strip() == "1"
+    customer_runtime = _customer_runtime_available()
+    if customer_runtime:
+        env.setdefault("MT_BUILD_TARGET", "customer")
+        env.setdefault("NEXT_PUBLIC_MT_BUILD_TARGET", "customer")
 
     try:
         python_cmd = _get_python_cmd()
-        npm_cmd = _get_npm_cmd()
+        npm_cmd = "" if _frontend_standalone_available() else _get_npm_cmd()
+        node_cmd = _get_node_cmd() if _frontend_standalone_available() else ""
     except RuntimeError as e:
         print(f"[ERROR] {e}")
         print("[HINT] 从资源管理器双击启动时系统 PATH 常不完整；启动器已尝试追加 Program Files\\nodejs 等路径。")
@@ -1809,7 +1921,9 @@ def main() -> int:
     _start_backend_watchdog()
 
     print(f"[INFO] 项目目录: {ROOT}")
-    print(f"[INFO] 启动模式: {'开发模式' if dev_mode else '生产模式优先'}")
+    print(
+        f"[INFO] 启动模式: {'客户版 standalone' if customer_runtime else ('开发模式' if dev_mode else '生产模式优先')}"
+    )
 
     backend_started = False
     frontend_started = False
@@ -1971,7 +2085,7 @@ def main() -> int:
                 + ", ".join(missing_routes)
                 + "，将重启并重建前端。"
             )
-        elif not dev_mode and not build_hash_matches:
+        elif not dev_mode and not _frontend_standalone_available() and not build_hash_matches:
             frontend_restart_needed = True
             frontend_force_rebuild = True
             print("[WARN] 检测到前端源码版本已变化（哈希不一致），将重启并重建前端。")
@@ -1992,7 +2106,22 @@ def main() -> int:
                 _kill_pids(managed)
                 time.sleep(1)
 
-        if not (FRONTEND_DIR / "node_modules").exists():
+        if _frontend_standalone_available():
+            frontend_proc = _start_frontend_standalone_server(node_cmd, WEB_PORT, env)
+            frontend_started = True
+            print(f"[OK] 已提交前端启动 (standalone, port={WEB_PORT})")
+            spawn_ok, spawn_detail = _verify_frontend_spawn_alive(frontend_proc)
+            if not spawn_ok:
+                print(f"[ERROR] {spawn_detail}")
+                _flush_stdio()
+                if getattr(sys, "frozen", False):
+                    _win_message_box(
+                        spawn_detail[:3900],
+                        "MultiTradingLauncher — 前端进程退出",
+                        icon_info=False,
+                    )
+                return 1
+        elif not (FRONTEND_DIR / "node_modules").exists():
             hint = (
                 "未找到 frontend\\node_modules，前端依赖尚未安装。\n\n"
                 f"请在终端执行:\n  cd /d \"{FRONTEND_DIR}\"\n  npm install\n\n"
@@ -2004,37 +2133,38 @@ def main() -> int:
                 _win_message_box(hint, "MultiTradingLauncher — 缺少 node_modules", icon_info=False)
             return 1
 
-        build_ready = _frontend_build_ready()
-        need_build = (not dev_mode) and (frontend_force_rebuild or not build_ready or not build_hash_matches)
-        if need_build:
-            print("[INFO] 正在执行 npm run build（确保包含 /options 路由）...")
-            rc = _run_sync([npm_cmd, "run", "build"], FRONTEND_DIR, env)
-            build_ready = _frontend_build_ready()
-            if rc != 0 or not build_ready:
-                print("[WARN] 前端生产构建失败，将回退到 dev 模式启动。")
-            else:
-                _write_text_file(_frontend_hash_marker_path(), frontend_source_hash)
-        forced_mode = str(os.getenv("LONGPORT_FRONTEND_MODE", "") or "").strip().lower()
-        if forced_mode in {"dev", "start"}:
-            frontend_script = forced_mode
-        elif dev_mode or not build_ready or getattr(sys, "frozen", False):
-            frontend_script = "dev"
         else:
-            frontend_script = "start"
-        frontend_proc = _start_frontend_dev_server(npm_cmd, frontend_script, WEB_PORT, env)
-        frontend_started = True
-        print(f"[OK] 已提交前端启动 ({frontend_script}, port={WEB_PORT})")
-        spawn_ok, spawn_detail = _verify_frontend_spawn_alive(frontend_proc)
-        if not spawn_ok:
-            print(f"[ERROR] {spawn_detail}")
-            _flush_stdio()
-            if getattr(sys, "frozen", False):
-                _win_message_box(
-                    spawn_detail[:3900],
-                    "MultiTradingLauncher — 前端进程退出",
-                    icon_info=False,
-                )
-            return 1
+            build_ready = _frontend_build_ready()
+            need_build = (not dev_mode) and (frontend_force_rebuild or not build_ready or not build_hash_matches)
+            if need_build:
+                print("[INFO] 正在执行 npm run build（确保包含 /options 路由）...")
+                rc = _run_sync([npm_cmd, "run", "build"], FRONTEND_DIR, env)
+                build_ready = _frontend_build_ready()
+                if rc != 0 or not build_ready:
+                    print("[WARN] 前端生产构建失败，将回退到 dev 模式启动。")
+                else:
+                    _write_text_file(_frontend_hash_marker_path(), frontend_source_hash)
+            forced_mode = str(os.getenv("LONGPORT_FRONTEND_MODE", "") or "").strip().lower()
+            if forced_mode in {"dev", "start"}:
+                frontend_script = forced_mode
+            elif dev_mode or not build_ready or getattr(sys, "frozen", False):
+                frontend_script = "dev"
+            else:
+                frontend_script = "start"
+            frontend_proc = _start_frontend_dev_server(npm_cmd, frontend_script, WEB_PORT, env)
+            frontend_started = True
+            print(f"[OK] 已提交前端启动 ({frontend_script}, port={WEB_PORT})")
+            spawn_ok, spawn_detail = _verify_frontend_spawn_alive(frontend_proc)
+            if not spawn_ok:
+                print(f"[ERROR] {spawn_detail}")
+                _flush_stdio()
+                if getattr(sys, "frozen", False):
+                    _win_message_box(
+                        spawn_detail[:3900],
+                        "MultiTradingLauncher — 前端进程退出",
+                        icon_info=False,
+                    )
+                return 1
 
     if backend_started or frontend_started:
         print("[INFO] 服务启动中，稍后将自动打开浏览器...")

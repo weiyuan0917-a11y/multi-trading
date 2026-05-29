@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
 
 const NAV_COLLAPSED_KEY = "lp_console_nav_collapsed";
+const IS_CUSTOMER_BUILD = process.env.NEXT_PUBLIC_MT_BUILD_TARGET === "customer";
 
 function Icon({
   className,
@@ -34,14 +35,13 @@ function Icon({
 type NavItem = { href: string; label: string; icon: ReactNode };
 
 const labels = {
-  onboarding: "本地 Agent 向导",
+  onboarding: "\u672c\u5730 Agent \u5411\u5bfc",
   setup: "\u9996\u6b21\u914d\u7f6e Setup",
   dashboard: "\u603b\u89c8 Dashboard",
   market: "\u5e02\u573a\u5206\u6790",
   news: "\u65b0\u95fb\u4fe1\u606f\u6d41",
   signals: "\u4fe1\u53f7\u4e2d\u5fc3",
   backtest: "\u56de\u6d4b\u4e2d\u5fc3",
-  autoTrading: "\u81ea\u52a8\u4ea4\u6613",
   research: "\u7814\u7a76\u4e2d\u5fc3",
   tradingAgents: "TradingAgents \u667a\u80fd\u4f53",
   agentStrategyLab: "Agent Strategy Lab",
@@ -146,20 +146,6 @@ const items: NavItem[] = [
         <path d="M3 12a9 9 0 1 0 3-6.7" />
         <path d="M3 4v5h5" />
         <path d="M12 6v6l4 2" />
-      </Icon>
-    ),
-  },
-  {
-    href: "/auto-trading",
-    label: labels.autoTrading,
-    icon: (
-      <Icon>
-        <path d="M7 7h10" />
-        <path d="M12 3v4" />
-        <rect x="4" y="9" width="16" height="10" rx="2" />
-        <path d="M8 14h.01M16 14h.01" />
-        <path d="M10 17h4" />
-        <path d="M2 14h2M20 14h2" />
       </Icon>
     ),
   },
@@ -277,7 +263,7 @@ const items: NavItem[] = [
 
 function isActivePath(pathname: string | null, href: string) {
   if (pathname === href) return true;
-  return href === "/auto-trading" && Boolean(pathname?.startsWith("/auto-trading/"));
+  return false;
 }
 
 export function Nav() {
@@ -359,7 +345,10 @@ export function Nav() {
       </div>
 
       <nav className="space-y-1">
-        {items.map((item) => {
+        {items.filter((item) => {
+          if (!IS_CUSTOMER_BUILD) return true;
+          return !["/admin/orders", "/admin/licenses"].includes(item.href);
+        }).map((item) => {
           const active = isActivePath(pathname, item.href);
           return (
             <Link

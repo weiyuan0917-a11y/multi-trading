@@ -8,6 +8,7 @@ import { BackendConnectionBanner } from "@/components/backend-connection-banner"
 import { cloudGet } from "@/lib/cloud-api";
 import { authHeaders, getAuthToken, setAuthToken } from "@/lib/auth";
 import { setLocalAgentCloudIdentity } from "@/lib/local-agent-api";
+import { getJsonApiErrorStatus } from "@/lib/http-client";
 
 type AuthMeResponse = {
   ok?: boolean;
@@ -63,10 +64,13 @@ export function LocalAuthShell({ children }: { children: React.ReactNode }) {
           router.replace("/setup");
           return;
         }
-      } catch {
-        setAuthToken("");
-        setLocalAgentCloudIdentity({});
-        if (!isAuthRoute) router.replace("/auth");
+      } catch (error) {
+        if (getJsonApiErrorStatus(error) === 401) {
+          setAuthToken("");
+          setLocalAgentCloudIdentity({});
+          if (!isAuthRoute) router.replace("/auth");
+          return;
+        }
       } finally {
         if (!cancelled) setReady(true);
       }

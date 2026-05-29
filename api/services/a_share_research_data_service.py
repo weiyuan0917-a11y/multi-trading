@@ -15,7 +15,10 @@ from typing import Any, Callable
 SCHEMA = "a_share_research_data.v2"
 _CACHE_TTL_SECONDS = 15 * 60
 _SNAPSHOT_CACHE_TTL_SECONDS = 24 * 60 * 60
-_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT_DIR = os.path.abspath(
+    os.getenv("MULTITRADING_ROOT")
+    or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 _SNAPSHOT_CACHE_DIR = os.path.join(_ROOT_DIR, "data", "research_cache", "a_share")
 
 _EVENT_TAG_KEYWORDS = [

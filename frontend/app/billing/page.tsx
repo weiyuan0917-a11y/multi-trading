@@ -8,8 +8,8 @@ import {
   PAYMENT_PROVIDERS,
   normalizePaymentMethod,
   normalizePaymentProvider,
-  type PaymentProviderId,
   type PaymentMethod,
+  type PaymentProviderId,
 } from "@/lib/payment-providers";
 
 type Plan = "pro" | "premium";
@@ -37,10 +37,6 @@ type ManualOrder = {
   paymentMethod: PaymentMethod;
   paymentProvider?: PaymentProviderId;
   providerOrderId?: string;
-  providerStatus?: string;
-  payUrl?: string;
-  qrCodeUrl?: string;
-  expiresAt?: number | null;
   status: string;
   createdAt: number;
 };
@@ -73,30 +69,12 @@ const PAYMENT_LABELS: Record<PaymentMethod, string> = {
   other: "其他方式",
 };
 
-const WECHAT_QR_URLS = [
-  process.env.NEXT_PUBLIC_PAYMENT_QR_WECHAT_URL,
-  "/payments/wechat-qr.jpg",
-  "/payments/wechat-qr.png",
-  "/payments/20260517-151434.png",
-].filter(Boolean) as string[];
-const ALIPAY_QR_URLS = [
-  process.env.NEXT_PUBLIC_PAYMENT_QR_ALIPAY_URL,
-  "/payments/alipay-qr.jpg",
-  "/payments/alipay-qr.png",
-  "/payments/20260517-151444.jpg",
-].filter(Boolean) as string[];
-const WISE_QR_URLS = [
-  process.env.NEXT_PUBLIC_PAYMENT_QR_WISE_URL,
-  "/payments/wise-qr.jpg",
-  "/payments/wise-qr.png",
-].filter(Boolean) as string[];
+const WECHAT_QR_URLS = [process.env.NEXT_PUBLIC_PAYMENT_QR_WECHAT_URL, "/payments/wechat-qr.jpg", "/payments/wechat-qr.png"].filter(Boolean) as string[];
+const ALIPAY_QR_URLS = [process.env.NEXT_PUBLIC_PAYMENT_QR_ALIPAY_URL, "/payments/alipay-qr.jpg", "/payments/alipay-qr.png"].filter(Boolean) as string[];
+const WISE_QR_URLS = [process.env.NEXT_PUBLIC_PAYMENT_QR_WISE_URL, "/payments/wise-qr.jpg", "/payments/wise-qr.png"].filter(Boolean) as string[];
 
-function priceLabel(plan: Plan, cycle: BillingCycle) {
-  return `CNY ${PRICES[plan][cycle].toLocaleString("zh-CN")}`;
-}
-
-function moneyLabel(amount: number, currency: string = "CNY") {
-  return `${currency || "CNY"} ${Number(amount || 0).toLocaleString("zh-CN")}`;
+function moneyLabel(amount: number, currency = "CNY") {
+  return `${currency} ${Number(amount || 0).toLocaleString("zh-CN")}`;
 }
 
 function formatTime(value?: number | null) {
@@ -107,15 +85,15 @@ function formatTime(value?: number | null) {
 function QrBox({ title, srcs, active }: { title: string; srcs: string[]; active: boolean }) {
   const [srcIndex, setSrcIndex] = useState(0);
   const src = srcs[srcIndex] || "";
-  const failed = !src;
   useEffect(() => setSrcIndex(0), [srcs]);
+
   return (
     <div className={`rounded-2xl border p-4 ${active ? "border-cyan-400/45 bg-cyan-400/10" : "border-slate-700 bg-slate-950/35"}`}>
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="text-sm font-semibold text-slate-100">{title}</div>
         {active ? <span className="rounded-full border border-cyan-300/35 bg-cyan-400/10 px-2 py-0.5 text-xs text-cyan-100">当前选择</span> : null}
       </div>
-      {!failed ? (
+      {src ? (
         <img
           src={src}
           alt={`${title}收款码`}
@@ -138,7 +116,7 @@ export default function BillingPage() {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("wechat");
   const [email, setEmail] = useState("");
   const [ownerId, setOwnerId] = useState("");
-  const [intent, setIntent] = useState("开通/续期");
+  const [intent, setIntent] = useState("开通 / 续期");
   const [note, setNote] = useState("");
   const [order, setOrder] = useState<ManualOrder | null>(null);
   const [loading, setLoading] = useState(false);
@@ -146,7 +124,7 @@ export default function BillingPage() {
   const [error, setError] = useState("");
 
   const amount = PRICES[plan][cycle];
-  const paymentRemark = order ? `${order.orderNo} ${order.ownerId}` : `订单生成后显示`;
+  const paymentRemark = order ? `${order.orderNo} ${order.ownerId}` : "订单生成后显示";
   const selectedProvider = PAYMENT_PROVIDERS[paymentProvider];
   const canSubmit = useMemo(() => {
     return Boolean(email.trim().includes("@") && /^[a-z0-9][a-z0-9_-]{2,39}$/.test(ownerId.trim().toLowerCase()));
@@ -165,7 +143,7 @@ export default function BillingPage() {
         if (!ownerId && data?.user?.username) setOwnerId(data.user.username);
         if (!email && data?.user?.email) setEmail(data.user.email);
       } catch {
-        /* Prefill is best-effort. */
+        // Prefill is best-effort.
       }
     };
     void load();
@@ -199,7 +177,7 @@ export default function BillingPage() {
       const data = (await response.json()) as ManualOrderResponse;
       if (!response.ok || data.error || !data.order) throw new Error(data.error || `request_${response.status}`);
       setOrder(data.order);
-      setMessage("订单已生成。扫码付款时请尽量填写订单号备注，管理员确认到账后会自动发送 License 邮件。");
+      setMessage("订单已生成。付款时请尽量填写订单号备注，管理员确认到账后会发放 License。");
     } catch (err: any) {
       setError(String(err?.message || err));
     } finally {
@@ -223,9 +201,9 @@ export default function BillingPage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="text-sm font-semibold text-cyan-200/80">MultiTrading Billing</div>
-            <h1 className="mt-2 text-3xl font-bold text-slate-50">订购 / 升级</h1>
+            <h1 className="mt-2 text-3xl font-bold text-slate-50">订购与升级</h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-              先生成订单，再扫码付款。管理员确认到账后，系统会自动签发本地 License 并发送到你的邮箱。
+              先生成订单，再扫码付款。管理员确认到账后，系统会签发本地 License 并发送到你的邮箱。
             </p>
           </div>
           <div className="rounded-2xl border border-slate-700 bg-slate-950/40 px-4 py-3 text-right">
@@ -256,21 +234,17 @@ export default function BillingPage() {
                     <div>
                       <div className="text-lg font-bold text-slate-50">{PLAN_LABELS[item]}</div>
                       <div className="mt-1 text-sm leading-6 text-slate-400">
-                        {item === "pro" ? "股票自动交易，适合股票策略用户。" : "期权自动交易、多券商和多账户。"}
+                        {item === "pro" ? "股票自动交易与基础策略能力。" : "期权自动交易、多券商和多账户增强能力。"}
                       </div>
                     </div>
                     <div className="text-right">
                       <div className="text-sm text-slate-500">月付</div>
-                      <div className="font-semibold text-slate-100">{priceLabel(item, "month")}</div>
+                      <div className="font-semibold text-slate-100">{moneyLabel(PRICES[item].month)}</div>
                     </div>
                   </div>
                   <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
-                    <div className="rounded-xl border border-slate-700 bg-slate-950/45 px-3 py-2">
-                      月付 {priceLabel(item, "month")}
-                    </div>
-                    <div className="rounded-xl border border-slate-700 bg-slate-950/45 px-3 py-2">
-                      年付 {priceLabel(item, "year")}
-                    </div>
+                    <div className="rounded-xl border border-slate-700 bg-slate-950/45 px-3 py-2">月付 {moneyLabel(PRICES[item].month)}</div>
+                    <div className="rounded-xl border border-slate-700 bg-slate-950/45 px-3 py-2">年付 {moneyLabel(PRICES[item].year)}</div>
                   </div>
                 </button>
               ))}
@@ -288,7 +262,7 @@ export default function BillingPage() {
             <label className="grid gap-2">
               <span className="field-label">用途</span>
               <select className="input-base" value={intent} onChange={(event) => setIntent(event.target.value)}>
-                <option value="开通/续期">开通 / 续期</option>
+                <option value="开通 / 续期">开通 / 续期</option>
                 <option value="升级套餐">升级套餐</option>
               </select>
             </label>
@@ -355,7 +329,9 @@ export default function BillingPage() {
             <div className="mt-3 rounded-2xl border border-slate-700 bg-slate-950/35 p-4">
               <div className="flex items-center justify-between gap-4 border-b border-slate-700/70 pb-3">
                 <span className="text-slate-500">套餐</span>
-                <span className="font-semibold text-slate-100">{PLAN_LABELS[plan]} / {CYCLE_LABELS[cycle]}</span>
+                <span className="font-semibold text-slate-100">
+                  {PLAN_LABELS[plan]} / {CYCLE_LABELS[cycle]}
+                </span>
               </div>
               <div className="flex items-center justify-between gap-4 border-b border-slate-700/70 py-3">
                 <span className="text-slate-500">金额</span>
@@ -373,12 +349,6 @@ export default function BillingPage() {
                 <span className="text-slate-500">订单号</span>
                 <span className="font-mono text-sm text-slate-100">{order?.orderNo || "生成后显示"}</span>
               </div>
-              {order?.providerOrderId ? (
-                <div className="flex items-center justify-between gap-4 pt-3">
-                  <span className="text-slate-500">通道单号</span>
-                  <span className="font-mono text-sm text-slate-100">{order.providerOrderId}</span>
-                </div>
-              ) : null}
             </div>
           </div>
 
@@ -404,12 +374,8 @@ export default function BillingPage() {
           {paymentMethod === "wise" ? (
             <div className="rounded-2xl border border-cyan-300/35 bg-cyan-300/10 p-4 text-sm leading-6 text-cyan-50">
               <div className="font-semibold">Wise 付款</div>
-              <div className="mt-2 text-cyan-50/85">
-                请扫描 Wise 收款码付款人民币，并在备注里填写订单号，方便管理员确认到账后签发 License。
-              </div>
-              <div className="mt-2 rounded-xl border border-cyan-200/30 bg-slate-950/35 px-3 py-2 font-mono text-xs">
-                {paymentRemark}
-              </div>
+              <div className="mt-2 text-cyan-50/85">请扫描 Wise 收款码付款，并在备注里填写订单号，方便管理员确认到账后签发 License。</div>
+              <div className="mt-2 rounded-xl border border-cyan-200/30 bg-slate-950/35 px-3 py-2 font-mono text-xs">{paymentRemark}</div>
             </div>
           ) : null}
 
@@ -418,7 +384,7 @@ export default function BillingPage() {
               <div className="font-semibold text-slate-100">订单已提交</div>
               <div className="mt-2">创建时间：{formatTime(order.createdAt)}</div>
               <div>当前状态：待管理员确认收款</div>
-              <div className="mt-2 text-cyan-100">确认到账后，License 会自动发送到 {order.email}。</div>
+              <div className="mt-2 text-cyan-100">确认到账后，License 会发送到 {order.email}。</div>
             </div>
           ) : null}
         </aside>

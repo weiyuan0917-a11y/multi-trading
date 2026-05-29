@@ -14,7 +14,10 @@ from api.brokers import service_layer as broker_service
 from api.services.broker_client_service import BROKER_CONNECT_BREAKER_SECONDS
 from config.live_settings import live_settings
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.abspath(
+    os.getenv("MULTITRADING_ROOT")
+    or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 _ACCOUNTS_DATA_DIR = os.path.join(_ROOT, "data", "accounts")
 
 

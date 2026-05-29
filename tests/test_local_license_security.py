@@ -165,37 +165,36 @@ def test_license_downgrade_is_rejected(isolated_license_store, rsa_keypair):
     assert downgraded["validation_reason"] == "lower_plan_rejected"
 
 
-def test_paid_endpoint_without_license_is_403_and_fake_cloud_header_ignored(isolated_license_store):
+def test_removed_auto_trading_endpoint_is_410_without_license(isolated_license_store):
     client = TestClient(app)
-    with patch("api.runtime_bridge.auto_trading_module_start", side_effect=AssertionError("should_not_start")):
-        response = client.post(
-            "/auto-trading/stocks/start",
-            json={},
-            headers={
-                "X-MT-Local-Owner": "alice",
-                "X-MT-Cloud-Plan": "premium",
-                "X-MT-Cloud-Role": "admin",
-                "X-MT-Cloud-Is-Admin": "true",
-            },
-        )
+    response = client.post(
+        "/auto-trading/stocks/start",
+        json={},
+        headers={
+            "X-MT-Local-Owner": "alice",
+            "X-MT-Cloud-Plan": "premium",
+            "X-MT-Cloud-Role": "admin",
+            "X-MT-Cloud-Is-Admin": "true",
+        },
+    )
 
-    assert response.status_code == 403
+    assert response.status_code == 410
+    assert response.json()["detail"]["reason"] == "auto_trading_removed"
 
 
-def test_paid_endpoint_with_valid_license_is_200(isolated_license_store, rsa_keypair):
+def test_removed_auto_trading_endpoint_is_410_with_valid_license(isolated_license_store, rsa_keypair):
     saved = licenses.save_local_license(_rsa_license(rsa_keypair, owner="alice", plan="pro"))
     assert saved["valid"] is True
 
     client = TestClient(app)
-    with patch("api.runtime_bridge.auto_trading_module_start", return_value={"ok": True, "module_id": "stocks"}):
-        response = client.post(
-            "/auto-trading/stocks/start",
-            json={},
-            headers={"X-MT-Local-Owner": "alice"},
-        )
+    response = client.post(
+        "/auto-trading/stocks/start",
+        json={},
+        headers={"X-MT-Local-Owner": "alice"},
+    )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
+    assert response.status_code == 410
+    assert response.json()["detail"]["reason"] == "auto_trading_removed"
 
 
 def test_expired_license_key_keeps_entitlement_when_subscription_is_active(isolated_license_store, rsa_keypair):
@@ -256,7 +255,7 @@ def test_local_owner_header_must_match_authenticated_session(isolated_license_st
     assert detail["requested_owner"] == "davies"
 
 
-def test_matching_local_owner_header_uses_authenticated_session_entitlement(isolated_license_store):
+def test_matching_local_owner_header_still_gets_removed_auto_trading_endpoint(isolated_license_store):
     client = TestClient(app)
     fake_auth = type(
         "FakeAuth",
@@ -269,10 +268,7 @@ def test_matching_local_owner_header_uses_authenticated_session_entitlement(isol
         },
     )()
 
-    with (
-        patch("api.routers.local_owner.get_user_auth_service", return_value=fake_auth),
-        patch("api.runtime_bridge.auto_trading_module_start", return_value={"ok": True, "owner_id": "davies"}) as start,
-    ):
+    with patch("api.routers.local_owner.get_user_auth_service", return_value=fake_auth):
         response = client.post(
             "/auto-trading/options-0dte/start",
             json={},
@@ -282,10 +278,8 @@ def test_matching_local_owner_header_uses_authenticated_session_entitlement(isol
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    start.assert_called_once()
-    assert start.call_args.kwargs["owner_id"] == "davies"
+    assert response.status_code == 410
+    assert response.json()["detail"]["reason"] == "auto_trading_removed"
 
 
 def test_qqq_live_service_start_requires_option_auto_trading_entitlement(isolated_license_store):

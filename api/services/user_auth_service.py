@@ -12,10 +12,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.abspath(
+    os.getenv("MULTITRADING_ROOT")
+    or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 _AUTH_DATA_DIR = os.path.join(_ROOT, "data", "auth")
 _AUTH_USERS_FILE = os.path.join(_AUTH_DATA_DIR, "users.json")
 _AUTH_API_KEYS_FILE = os.path.join(_AUTH_DATA_DIR, "api_keys.json")
+_AUTH_SESSIONS_FILE = os.path.join(_AUTH_DATA_DIR, "sessions.json")
 _LOCK = threading.RLock()
 
 
@@ -73,8 +77,34 @@ def _save_api_keys_file(data: dict[str, Any]) -> None:
     os.replace(tmp, _AUTH_API_KEYS_FILE)
 
 
+def _load_sessions_file() -> dict[str, Any]:
+    if not os.path.isfile(_AUTH_SESSIONS_FILE):
+        return {"sessions": []}
+    try:
+        with open(_AUTH_SESSIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("sessions"), list):
+            return data
+    except Exception:
+        pass
+    return {"sessions": []}
+
+
+def _save_sessions_file(data: dict[str, Any]) -> None:
+    _ensure_parent_dir(_AUTH_SESSIONS_FILE)
+    tmp = _AUTH_SESSIONS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, _AUTH_SESSIONS_FILE)
+
+
 def _hash_api_key_plaintext(plaintext: str) -> str:
     return hashlib.sha256(str(plaintext or "").encode("utf-8")).hexdigest()
+
+
+def _hash_session_token(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
 
 
 def _normalize_username(username: str) -> str:
@@ -145,6 +175,36 @@ class UserAuthService:
     def __init__(self) -> None:
         self._sessions: dict[str, SessionInfo] = {}
         self._sessions_lock = threading.RLock()
+        self._load_persisted_sessions()
+
+    def _load_persisted_sessions(self) -> None:
+        with _LOCK:
+            rows = _load_sessions_file().get("sessions") or []
+        sessions: dict[str, SessionInfo] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            token_hash = str(row.get("token_hash") or "").strip()
+            username = _normalize_username(str(row.get("username") or ""))
+            created_at = str(row.get("created_at") or "").strip() or _now_iso()
+            if not token_hash or not username:
+                continue
+            sessions[token_hash] = SessionInfo(token=token_hash, username=username, created_at=created_at)
+        with self._sessions_lock:
+            self._sessions = sessions
+
+    def _persist_sessions_locked(self) -> None:
+        rows = [
+            {
+                "token_hash": info.token,
+                "username": info.username,
+                "created_at": info.created_at,
+            }
+            for info in self._sessions.values()
+            if info.token and info.username
+        ]
+        with _LOCK:
+            _save_sessions_file({"sessions": rows})
 
     def register(self, username: str, password: str) -> dict[str, Any]:
         name = _normalize_username(username)
@@ -190,9 +250,11 @@ class UserAuthService:
         if not _verify_password(password, str(row.get("password_salt", "")), str(row.get("password_hash", ""))):
             raise ValueError("invalid_username_or_password")
         token = secrets.token_urlsafe(32)
-        info = SessionInfo(token=token, username=name, created_at=_now_iso())
+        token_hash = _hash_session_token(token)
+        info = SessionInfo(token=token_hash, username=name, created_at=_now_iso())
         with self._sessions_lock:
-            self._sessions[token] = info
+            self._sessions[token_hash] = info
+            self._persist_sessions_locked()
         return {
             "ok": True,
             "token": token,
@@ -204,8 +266,13 @@ class UserAuthService:
         tk = str(token or "").strip()
         if not tk:
             raise ValueError("unauthorized")
+        token_hash = _hash_session_token(tk)
         with self._sessions_lock:
-            info = self._sessions.get(tk)
+            info = self._sessions.get(token_hash)
+        if info is None:
+            self._load_persisted_sessions()
+            with self._sessions_lock:
+                info = self._sessions.get(token_hash)
         if info is None:
             raise ValueError("unauthorized")
         with _LOCK:
@@ -240,8 +307,10 @@ class UserAuthService:
         tk = str(token or "").strip()
         if not tk:
             return
+        token_hash = _hash_session_token(tk)
         with self._sessions_lock:
-            self._sessions.pop(tk, None)
+            self._sessions.pop(token_hash, None)
+            self._persist_sessions_locked()
 
     def verify_api_key(self, raw_key: str) -> str:
         """

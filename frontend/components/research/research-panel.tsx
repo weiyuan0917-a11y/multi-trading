@@ -46,10 +46,20 @@ type ResearchUiCache = {
 
 type ResearchRunOptions = {
   run_openbb: boolean;
+  openbb_modules: {
+    price: boolean;
+    macro: boolean;
+    sec: boolean;
+    etf: boolean;
+    derivatives: boolean;
+  };
   run_tradingagents: boolean;
   run_pair_backtest: boolean;
   run_ml_diagnostics: boolean;
 };
+
+type ResearchRunOptionKey = Exclude<keyof ResearchRunOptions, "openbb_modules">;
+type OpenBBModuleKey = keyof ResearchRunOptions["openbb_modules"];
 
 type ResearchResultTab = "overview" | "research" | "strategy" | "ml" | "pair" | "export";
 
@@ -132,6 +142,13 @@ const MAX_RENDER_PAIR_TRADE_ROWS = 300;
 const MAX_FILTER_SCAN_PAIR_TRADE_ROWS = 4000;
 const DEFAULT_RESEARCH_RUN_OPTIONS: ResearchRunOptions = {
   run_openbb: true,
+  openbb_modules: {
+    price: true,
+    macro: true,
+    sec: true,
+    etf: true,
+    derivatives: false,
+  },
   run_tradingagents: true,
   run_pair_backtest: true,
   run_ml_diagnostics: true,
@@ -371,6 +388,21 @@ function mergeResearchCandidates(base: ResearchCandidateRow[], extra: ResearchCa
     });
   }
   return out;
+}
+
+function formatOpenbbReason(reason: unknown): string {
+  const value = String(reason || "").trim();
+  if (!value) return "-";
+  if (value === "empty_or_fmp_key_missing") return "需重启 OpenBB 或检查 FMP Key/套餐";
+  if (value === "fmp_payment_required") return "FMP 套餐不支持该 ETF 明细端点";
+  if (value === "fmp_endpoint_not_found") return "FMP/OpenBB ETF sectors 端点不可用";
+  if (value === "fmp_key_unauthorized") return "FMP Key 无效";
+  if (value === "fmp_forbidden") return "FMP Key 无权访问";
+  if (value === "empty_openbb_fmp_response") return "OpenBB FMP 返回空数据";
+  if (value === "empty_fmp_response") return "FMP 返回空数据";
+  if (value === "empty_filings") return "暂无 filings";
+  if (value === "empty_insider_trading") return "暂无 insider trading";
+  return value;
 }
 
 function formatConfigValue(value: unknown, key?: string): string {
@@ -1282,9 +1314,20 @@ export function ResearchPanel() {
     });
   };
 
-  const toggleResearchRunOption = (key: keyof ResearchRunOptions) => {
+  const toggleResearchRunOption = (key: ResearchRunOptionKey) => {
     if (researchStarting || researchRunning) return;
     setResearchRunOptions((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const toggleOpenBBModule = (key: OpenBBModuleKey) => {
+    if (researchStarting || researchRunning) return;
+    setResearchRunOptions((prev) => ({
+      ...prev,
+      openbb_modules: {
+        ...prev.openbb_modules,
+        [key]: !prev.openbb_modules[key],
+      },
+    }));
   };
 
   useEffect(() => {
@@ -2055,6 +2098,7 @@ export function ResearchPanel() {
       : {}),
   };
   const cnPublicData = providerStatus?.cn_public_data || {};
+  const openbbModules = providerStatus?.openbb_modules || {};
   const cnProviderNames = Array.isArray(cnPublicData?.providers)
     ? cnPublicData.providers
         .filter((p: any) => p?.enabled && p?.ready)
@@ -2072,8 +2116,22 @@ export function ResearchPanel() {
   const factorGating = researchSnapshotData?.factor_gating || {};
   const agentGating = researchSnapshotData?.agent_gating || {};
   const mlDiag = researchSnapshotData?.ml_diagnostics || {};
+  const externalRiskNotes = Array.isArray(researchSnapshotData?.external_risk_notes) ? researchSnapshotData.external_risk_notes : [];
+  const externalRiskGating = researchSnapshotData?.external_risk_gating || {};
+  const externalRiskCount = externalRiskNotes.filter((x: any) => ["risk", "warn"].includes(String(x?.severity || ""))).length;
   const regimeInfo = externalResearch?.market_regime || {};
+  const macroRegime = externalResearch?.macro_regime || {};
+  const macroFeatures = macroRegime?.features || {};
   const externalFactors = externalResearch?.symbol_factors || [];
+  const secDisclosures = Array.isArray(externalResearch?.sec_disclosures) ? externalResearch.sec_disclosures : [];
+  const secAvailableCount = secDisclosures.filter((x: any) => Boolean(x?.available)).length;
+  const secImportantCount = secDisclosures.reduce((sum: number, x: any) => sum + (Number(x?.important_count) || 0), 0);
+  const etfExposures = Array.isArray(externalResearch?.etf_exposures) ? externalResearch.etf_exposures : [];
+  const etfAvailableCount = etfExposures.filter((x: any) => Boolean(x?.available)).length;
+  const derivativesRisk = externalResearch?.derivatives_risk || {};
+  const derivativesOptions = derivativesRisk?.options || {};
+  const derivativesFutures = derivativesRisk?.futures_curve || {};
+  const derivativesCot = derivativesRisk?.cot || {};
   const tradingagentsInsights = Array.isArray(externalResearch?.tradingagents_insights)
     ? externalResearch.tradingagents_insights
     : [];
@@ -2148,6 +2206,12 @@ export function ResearchPanel() {
   ];
   const selectedResearchOptionLabels = [
     researchRunOptions.run_openbb ? "OpenBB" : "",
+    researchRunOptions.run_openbb
+      ? Object.entries(researchRunOptions.openbb_modules)
+          .filter(([, enabled]) => enabled)
+          .map(([name]) => name)
+          .join("/")
+      : "",
     researchRunOptions.run_tradingagents ? "TradingAgents" : "",
     researchRunOptions.run_pair_backtest ? "组合回测" : "",
     researchRunOptions.run_ml_diagnostics ? "轻量 ML" : "",
@@ -2285,7 +2349,7 @@ export function ResearchPanel() {
           ["run_pair_backtest", "组合回测快照", "Pair Pool 回测", ""],
           ["run_ml_diagnostics", "轻量 ML 诊断", "模型诊断", ""],
         ].map(([key, label, hint, badge]) => {
-          const k = key as keyof ResearchRunOptions;
+          const k = key as ResearchRunOptionKey;
           return (
             <label
               key={key}
@@ -2316,6 +2380,43 @@ export function ResearchPanel() {
             </label>
           );
         })}
+      </div>
+      <div
+        className={`mt-2 rounded-lg border border-slate-700/70 bg-slate-950/35 p-2 ${
+          researchRunOptions.run_openbb ? "" : "opacity-60"
+        }`}
+      >
+        <div className="mb-1.5 text-[11px] font-medium text-slate-300">OpenBB 子模块</div>
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(104px,1fr))] gap-1.5 text-[11px]">
+          {[
+            ["price", "Price"],
+            ["macro", "Macro"],
+            ["sec", "SEC"],
+            ["etf", "ETF"],
+            ["derivatives", "Derivatives"],
+          ].map(([key, label]) => {
+            const k = key as OpenBBModuleKey;
+            return (
+              <label
+                key={key}
+                className={`flex min-w-0 cursor-pointer items-center gap-1.5 rounded border px-2 py-1 ${
+                  researchRunOptions.openbb_modules[k]
+                    ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-100"
+                    : "border-slate-700 bg-slate-900/50 text-slate-400"
+                } ${researchStarting || researchRunning || !researchRunOptions.run_openbb ? "cursor-not-allowed opacity-60" : ""}`}
+              >
+                <input
+                  className="h-3 w-3 shrink-0 accent-cyan-400"
+                  type="checkbox"
+                  checked={researchRunOptions.openbb_modules[k]}
+                  disabled={researchStarting || researchRunning || !researchRunOptions.run_openbb}
+                  onChange={() => toggleOpenBBModule(k)}
+                />
+                <span className="min-w-0 truncate">{label}</span>
+              </label>
+            );
+          })}
+        </div>
       </div>
       <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-[auto_1fr]">
         <button
@@ -3016,6 +3117,14 @@ export function ResearchPanel() {
         <div className="mt-1 truncate text-slate-500" title={providerStatus?.openbb_base_url || ""}>
           {providerStatus?.openbb_base_url || "无外部因子服务"}
         </div>
+        <div className="mt-1 truncate text-slate-500" title={Object.entries(openbbModules).map(([k, v]) => `${k}:${v ? "on" : "off"}`).join(" / ")}>
+          {Object.keys(openbbModules).length
+            ? Object.entries(openbbModules)
+                .filter(([, v]) => Boolean(v))
+                .map(([k]) => k)
+                .join(" / ") || "modules off"
+            : "modules pending"}
+        </div>
       </div>
       <div
         className={`rounded-lg border p-3 text-xs ${
@@ -3060,6 +3169,64 @@ export function ResearchPanel() {
         </div>
       </div>
       <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3 text-xs text-slate-300">
+        <div>Macro：{macroRegime?.available ? macroRegime?.regime || "unknown" : "-"}</div>
+        <div className="mt-1 text-slate-400">
+          Risk：{typeof macroRegime?.risk_score === "number" ? macroRegime.risk_score : "-"} | Conf：{" "}
+          {typeof macroRegime?.confidence === "number" ? macroRegime.confidence : "-"}
+        </div>
+        <div className="mt-1 text-slate-400">
+          10Y：{typeof macroFeatures?.dgs10 === "number" ? macroFeatures.dgs10 : "-"} | 10Y-2Y：{" "}
+          {typeof macroFeatures?.spread_10y2y === "number" ? macroFeatures.spread_10y2y : "-"}
+        </div>
+        <div className="mt-1 truncate text-slate-500" title={(macroRegime?.reasons || []).join(" / ")}>
+          {(macroRegime?.reasons || []).slice(0, 2).join(" / ") || "No macro signal"}
+        </div>
+      </div>
+      <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3 text-xs text-slate-300">
+        <div>SEC：{secAvailableCount ? "available" : "-"}</div>
+        <div className="mt-1 text-slate-400">
+          Symbols：{secAvailableCount} / {secDisclosures.length || "-"}
+        </div>
+        <div className="mt-1 text-slate-400">Important：{secImportantCount || "-"}</div>
+        <div className="mt-1 truncate text-slate-500" title={secDisclosures.map((x: any) => x?.symbol).filter(Boolean).join(" / ")}>
+          {secDisclosures.map((x: any) => x?.symbol).filter(Boolean).slice(0, 4).join(" / ") || "No SEC disclosure"}
+        </div>
+      </div>
+      <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3 text-xs text-slate-300">
+        <div>ETF：{etfAvailableCount ? "available" : "-"}</div>
+        <div className="mt-1 text-slate-400">
+          Symbols：{etfAvailableCount} / {etfExposures.length || "-"}
+        </div>
+        <div className="mt-1 text-slate-400">
+          Holdings：{etfExposures.reduce((sum: number, x: any) => sum + (Number(x?.holdings?.count) || 0), 0) || "-"}
+        </div>
+        <div className="mt-1 truncate text-slate-500" title={etfExposures.map((x: any) => x?.symbol).filter(Boolean).join(" / ")}>
+          {etfExposures.map((x: any) => x?.symbol).filter(Boolean).slice(0, 4).join(" / ") || "No ETF exposure"}
+        </div>
+      </div>
+      <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3 text-xs text-slate-300">
+        <div>Derivatives：{derivativesRisk?.available ? "available" : "-"}</div>
+        <div className="mt-1 text-slate-400">
+          PCR Vol：{typeof derivativesOptions?.put_call_volume_ratio === "number" ? derivativesOptions.put_call_volume_ratio : "-"}
+        </div>
+        <div className="mt-1 text-slate-400">
+          0/1DTE：{derivativesOptions?.near_dte_contracts ?? "-"} | Curve：{derivativesFutures?.curve_spread ?? "-"}
+        </div>
+        <div className="mt-1 truncate text-slate-500">
+          COT lev net：{derivativesCot?.leveraged_money_net ?? "-"}
+        </div>
+      </div>
+      <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3 text-xs text-slate-300">
+        <div>Risk Notes：{externalRiskNotes.length || "-"}</div>
+        <div className="mt-1 text-slate-400">
+          Gating：{externalRiskGating?.enabled ? (externalRiskGating?.applied ? "applied" : "enabled") : "off"}
+        </div>
+        <div className="mt-1 text-slate-400">Warn/Risk：{externalRiskCount || "-"} | Mult：{externalRiskGating?.multiplier ?? "-"}</div>
+        <div className="mt-1 truncate text-slate-500" title={externalRiskNotes.map((x: any) => x?.title).filter(Boolean).join(" / ")}>
+          {externalRiskNotes.map((x: any) => x?.title).filter(Boolean).slice(0, 2).join(" / ") || "No risk notes"}
+        </div>
+      </div>
+      <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3 text-xs text-slate-300">
         <div>TradingAgents：{agentGating?.applied ? "已应用" : "未应用"}</div>
         <div className="mt-1 text-slate-400">
           Insight：{tradingagentsAvailableCount} / {tradingagentsInsights.length}
@@ -3098,6 +3265,208 @@ export function ResearchPanel() {
 
   {resultTab === "research" ? (
     <>
+  <details className="rounded-lg border border-slate-700/70 bg-slate-900/50 p-3">
+    <summary className="cursor-pointer text-sm font-medium text-slate-200">OpenBB 外部风险提示</summary>
+    <div className="mt-2 rounded border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-300">
+      Gating：{externalRiskGating?.enabled ? (externalRiskGating?.applied ? "applied" : "enabled") : "off"} ·
+      multiplier：{externalRiskGating?.multiplier ?? "-"} · reduction：{externalRiskGating?.reduction ?? "-"}
+      {!externalRiskGating?.enabled && externalRiskGating?.reason ? (
+        <span className="ml-2 text-slate-500">{externalRiskGating.reason}</span>
+      ) : null}
+    </div>
+    {!externalRiskNotes.length ? (
+      <div className="mt-2 text-xs text-slate-400">暂无外部风险提示，请先运行一次 Research。</div>
+    ) : (
+      <div className="mt-2 space-y-2">
+        {externalRiskNotes.map((note: any, idx: number) => (
+          <div
+            key={`${note?.source || "risk"}-${idx}`}
+            className={`rounded border px-3 py-2 text-xs ${
+              String(note?.severity || "") === "risk"
+                ? "border-rose-500/40 bg-rose-500/10 text-rose-100"
+                : String(note?.severity || "") === "warn"
+                  ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+                  : "border-slate-700 bg-slate-950/40 text-slate-300"
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">{note?.title || "Risk note"}</span>
+              <span className="rounded border border-current/30 px-1.5 py-0.5 text-[10px] uppercase opacity-80">
+                {note?.source || "openbb"} / {note?.severity || "info"}
+              </span>
+            </div>
+            <div className="mt-1 text-slate-300">{note?.message || "-"}</div>
+            {Array.isArray(note?.symbols) && note.symbols.length ? (
+              <div className="mt-1 text-[11px] text-slate-400">Symbols：{note.symbols.join(" / ")}</div>
+            ) : null}
+            {Array.isArray(note?.reasons) && note.reasons.length ? (
+              <div className="mt-1 text-[11px] text-slate-400">Reasons：{note.reasons.join(" / ")}</div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    )}
+  </details>
+
+  <details className="rounded-lg border border-slate-700/70 bg-slate-900/50 p-3">
+    <summary className="cursor-pointer text-sm font-medium text-slate-200">Options / Futures / CFTC</summary>
+    {!derivativesRisk?.available ? (
+      <div className="mt-2 text-xs text-slate-400">暂无衍生品风险数据，请先运行一次美股 Research 并启用 OpenBB。</div>
+    ) : (
+      <div className="mt-2 grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <div className="rounded border border-slate-800 bg-slate-950/40 p-3 text-xs text-slate-300">
+          <div className="font-medium text-slate-100">Options {derivativesRisk?.symbol || "QQQ"}</div>
+          <div className="mt-1 text-slate-400">Underlying：{derivativesOptions?.underlying_price ?? "-"}</div>
+          <div className="mt-1 text-slate-400">Contracts：{derivativesOptions?.total_contracts ?? "-"}</div>
+          <div className="mt-1 text-slate-400">
+            Nearest：{derivativesOptions?.nearest_expiration || "-"} / DTE {derivativesOptions?.nearest_dte ?? "-"}
+          </div>
+          <div className="mt-1 text-slate-400">PCR Volume：{derivativesOptions?.put_call_volume_ratio ?? "-"}</div>
+        </div>
+        <div className="rounded border border-slate-800 bg-slate-950/40 p-3 text-xs text-slate-300">
+          <div className="font-medium text-slate-100">Futures {derivativesFutures?.symbol || "NQ"}</div>
+          <div className="mt-1 text-slate-400">Contracts：{derivativesFutures?.count ?? "-"}</div>
+          <div className="mt-1 text-slate-400">Curve spread：{derivativesFutures?.curve_spread ?? "-"}</div>
+          <div className="mt-1 truncate text-slate-500">
+            {(derivativesFutures?.items || [])
+              .slice(0, 4)
+              .map((x: any) => `${x?.expiration}:${x?.price}`)
+              .join(" / ") || "-"}
+          </div>
+        </div>
+        <div className="rounded border border-slate-800 bg-slate-950/40 p-3 text-xs text-slate-300">
+          <div className="font-medium text-slate-100">CFTC COT</div>
+          <div className="mt-1 text-slate-400">{derivativesCot?.market || "-"}</div>
+          <div className="mt-1 text-slate-400">Date：{derivativesCot?.date || "-"}</div>
+          <div className="mt-1 text-slate-400">Lev net：{derivativesCot?.leveraged_money_net ?? "-"}</div>
+          <div className="mt-1 text-slate-400">Asset mgr net：{derivativesCot?.asset_manager_net ?? "-"}</div>
+        </div>
+      </div>
+    )}
+  </details>
+
+  <details className="rounded-lg border border-slate-700/70 bg-slate-900/50 p-3">
+    <summary className="cursor-pointer text-sm font-medium text-slate-200">ETF / 指数暴露</summary>
+    {!etfExposures.length ? (
+      <div className="mt-2 text-xs text-slate-400">暂无 ETF 暴露数据，请先运行一次 Research 并启用 OpenBB。</div>
+    ) : (
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full min-w-[760px] text-xs">
+          <thead className="text-left text-slate-400">
+            <tr>
+              <th className="py-1">Symbol</th>
+              <th className="py-1">Name</th>
+              <th className="py-1">Category</th>
+              <th className="py-1 text-right">Assets</th>
+              <th className="py-1 text-right">P/E</th>
+              <th className="py-1 text-right">YTD</th>
+              <th className="py-1">Holdings</th>
+            </tr>
+          </thead>
+          <tbody>
+            {etfExposures.map((row: any, idx: number) => {
+              const info = row?.info?.info || {};
+              const holdings = Array.isArray(row?.holdings?.items) ? row.holdings.items : [];
+              const assets = Number(info?.total_assets) || 0;
+              return (
+                <tr key={String(row?.symbol || idx)} className="border-t border-slate-800/80 text-slate-300">
+                  <td className="py-1 pr-3 font-medium text-slate-100">{row?.symbol || "-"}</td>
+                  <td className="py-1 pr-3">{info?.name || "-"}</td>
+                  <td className="py-1 pr-3">{info?.category || "-"}</td>
+                  <td className="py-1 pr-3 text-right">{assets ? `$${(assets / 1_000_000_000).toFixed(1)}B` : "-"}</td>
+                  <td className="py-1 pr-3 text-right">
+                    {typeof info?.trailing_pe === "number" && Number.isFinite(info.trailing_pe) ? info.trailing_pe.toFixed(1) : "-"}
+                  </td>
+                  <td className="py-1 pr-3 text-right">
+                    {typeof info?.return_ytd === "number" && Number.isFinite(info.return_ytd) ? `${info.return_ytd.toFixed(1)}%` : "-"}
+                  </td>
+                  <td className="py-1">
+                    {holdings.length
+                      ? holdings
+                          .slice(0, 3)
+                          .map((x: any) => x?.symbol || x?.name)
+                          .filter(Boolean)
+                          .join(" / ")
+                      : formatOpenbbReason(row?.holdings?.reason)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {etfExposures.some((x: any) => {
+          const reason = String(x?.holdings?.reason || x?.sectors?.reason || "");
+          return Boolean(reason && reason !== "empty_fmp_response" && reason !== "empty_openbb_fmp_response");
+        }) ? (
+          <div className="mt-2 text-[11px] text-amber-300">
+            FMP key 已接入时，ETF holdings/sectors 仍可能受 FMP 套餐或 OpenBB-FMP 端点兼容限制；当前会继续显示 yfinance 可用的 ETF 基础信息。
+          </div>
+        ) : null}
+      </div>
+    )}
+  </details>
+
+  <details className="rounded-lg border border-slate-700/70 bg-slate-900/50 p-3">
+    <summary className="cursor-pointer text-sm font-medium text-slate-200">SEC 披露详情</summary>
+    {!secDisclosures.length ? (
+      <div className="mt-2 text-xs text-slate-400">暂无 SEC 披露数据，请先运行一次美股 Research 并启用 OpenBB。</div>
+    ) : (
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full min-w-[760px] text-xs">
+          <thead className="text-left text-slate-400">
+            <tr>
+              <th className="py-1">Symbol</th>
+              <th className="py-1">Important</th>
+              <th className="py-1">Latest Filing</th>
+              <th className="py-1">Type</th>
+              <th className="py-1">Insider</th>
+              <th className="py-1 text-right">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {secDisclosures.map((row: any, idx: number) => {
+              const filing = Array.isArray(row?.filings?.items) ? row.filings.items[0] : null;
+              const insider = Array.isArray(row?.insider_trading?.items) ? row.insider_trading.items[0] : null;
+              const filingUrl = filing?.filing_detail_url || filing?.report_url || "";
+              const insiderUrl = insider?.filing_url || "";
+              return (
+                <tr key={String(row?.symbol || idx)} className="border-t border-slate-800/80 text-slate-300">
+                  <td className="py-1 pr-3 font-medium text-slate-100">{row?.symbol || "-"}</td>
+                  <td className="py-1 pr-3 text-amber-200">{row?.important_count ?? 0}</td>
+                  <td className="py-1 pr-3">
+                    {filingUrl ? (
+                      <a className="text-cyan-200 hover:text-cyan-100" href={filingUrl} target="_blank" rel="noreferrer">
+                        {filing?.filing_date || filing?.accepted_date || "-"}
+                      </a>
+                    ) : (
+                      filing?.filing_date || "-"
+                    )}
+                  </td>
+                  <td className="py-1 pr-3">{filing?.report_type || "-"}</td>
+                  <td className="py-1 pr-3">
+                    {insiderUrl ? (
+                      <a className="text-cyan-200 hover:text-cyan-100" href={insiderUrl} target="_blank" rel="noreferrer">
+                        {insider?.owner_name || "-"}
+                      </a>
+                    ) : (
+                      insider?.owner_name || "-"
+                    )}
+                    <div className="truncate text-[11px] text-slate-500">
+                      {insider?.acquisition_or_disposition || "-"} {insider?.transaction_date || ""}
+                    </div>
+                  </td>
+                  <td className="py-1 text-right">
+                    {typeof insider?.transaction_value === "number" ? `$${insider.transaction_value.toLocaleString()}` : "-"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    )}
+  </details>
+
   <details className="rounded-lg border border-slate-700/70 bg-slate-900/50 p-3">
     <summary className="cursor-pointer text-sm font-medium text-slate-200">TradingAgents 研判详情</summary>
     <div className="mt-2 text-xs text-slate-400">

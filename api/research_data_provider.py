@@ -1,4 +1,5 @@
 import json
+import hashlib
 import math
 import os
 import re
@@ -198,6 +199,56 @@ class OpenBBClient:
             return False
 
     @staticmethod
+    def _listener_pids_for_port(port: int) -> list[int]:
+        pids: set[int] = set()
+        try:
+            if os.name == "nt":
+                proc = subprocess.run(  # noqa: S603
+                    ["netstat", "-ano", "-p", "tcp"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                for raw in (proc.stdout or "").splitlines():
+                    parts = raw.split()
+                    if len(parts) < 5 or parts[0].upper() != "TCP":
+                        continue
+                    local_addr = parts[1]
+                    state = parts[-2].upper()
+                    pid_raw = parts[-1]
+                    if state != "LISTENING" or not local_addr.endswith(f":{int(port)}"):
+                        continue
+                    try:
+                        pids.add(int(pid_raw))
+                    except Exception:
+                        continue
+        except Exception:
+            return []
+        return sorted(pids)
+
+    @staticmethod
+    def _stop_pids(pids: list[int]) -> list[dict[str, Any]]:
+        stopped: list[dict[str, Any]] = []
+        for pid in sorted({int(x) for x in pids if int(x) > 0}):
+            try:
+                if os.name == "nt":
+                    proc = subprocess.run(  # noqa: S603
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    stopped.append({"pid": pid, "ok": proc.returncode == 0, "returncode": proc.returncode})
+                else:
+                    os.kill(pid, 15)
+                    stopped.append({"pid": pid, "ok": True, "returncode": 0})
+            except Exception as e:
+                stopped.append({"pid": pid, "ok": False, "error": str(e)})
+        return stopped
+
+    @staticmethod
     def _openbb_cmd(root: Path) -> tuple[list[str] | None, str]:
         candidates = [
             root / ".openbb-venv" / "Scripts" / "openbb-api.exe",
@@ -248,6 +299,60 @@ class OpenBBClient:
                 stderr=subprocess.DEVNULL,
             )
             return {"attempted": True, "cmd": hint}
+
+    @classmethod
+    def clear_openbb_cache(cls) -> dict[str, Any]:
+        cache_dir = cls._openbb_cache_dir()
+        removed = 0
+        try:
+            if cache_dir.exists():
+                for fp in cache_dir.glob("*.json"):
+                    try:
+                        fp.unlink()
+                        removed += 1
+                    except Exception:
+                        continue
+            return {"ok": True, "path": str(cache_dir), "removed": removed}
+        except Exception as e:
+            return {"ok": False, "path": str(cache_dir), "removed": removed, "error": str(e)}
+
+    def process_status(self) -> dict[str, Any]:
+        is_local, host, port = self._local_port()
+        return {
+            "local": bool(is_local),
+            "host": host,
+            "port": int(port),
+            "port_open": bool(self._port_open(host, port)) if is_local else None,
+            "listener_pids": self._listener_pids_for_port(port) if is_local else [],
+        }
+
+    def restart(self, clear_cache: bool = True) -> dict[str, Any]:
+        global _OPENBB_LAST_AUTOSTART_TS
+        if not self.is_configured():
+            return {"ok": False, "reason": "openbb_disabled_or_unconfigured", "health": self.health()}
+        is_local, host, port = self._local_port()
+        if not is_local:
+            return {"ok": False, "reason": "openbb_remote_base_url", "base_url": self.base_url}
+        before = self.process_status()
+        stopped = self._stop_pids(before.get("listener_pids") or [])
+        for _ in range(20):
+            if not self._port_open(host, port):
+                break
+            time.sleep(0.25)
+        cache = self.clear_openbb_cache() if clear_cache else {"ok": True, "skipped": True}
+        _OPENBB_LAST_AUTOSTART_TS = 0.0
+        autostart = self._maybe_autostart()
+        health = self.ensure_available() if autostart.get("attempted") else self.health()
+        return {
+            "ok": bool(health.get("ok")),
+            "reason": "" if health.get("ok") else (health.get("reason") or autostart.get("reason") or "openbb_restart_failed"),
+            "before": before,
+            "stopped": stopped,
+            "cache": cache,
+            "autostart": autostart,
+            "health": health,
+            "after": self.process_status(),
+        }
 
     def ensure_available(self) -> dict[str, Any]:
         health = self.health()
@@ -320,6 +425,882 @@ class OpenBBClient:
                 if isinstance(nested, list):
                     return [x for x in nested if isinstance(x, dict)]
         return []
+
+    def _openbb_get(self, path: str, params: dict[str, Any], timeout: Optional[float] = None) -> Any:
+        qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+        route = "/" + str(path or "").lstrip("/")
+        url = f"{self.base_url}{route}"
+        if qs:
+            url = f"{url}?{qs}"
+        ttl = self._openbb_cache_ttl(route)
+        cache_params = self._openbb_cache_params(route, params)
+        cached = self._openbb_cache_get(route, cache_params, ttl)
+        if cached is not None:
+            return cached
+        payload = _http_get_any(url, timeout=float(timeout if timeout is not None else self.timeout))
+        if payload is not None:
+            self._openbb_cache_set(route, cache_params, payload)
+        return payload
+
+    @staticmethod
+    def _openbb_cache_enabled() -> bool:
+        return str(os.getenv("OPENBB_CACHE_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _openbb_cache_dir() -> Path:
+        return Path(__file__).resolve().parents[1] / "data" / "research_cache" / "openbb"
+
+    @staticmethod
+    def _openbb_cache_ttl(path: str) -> int:
+        default_ttl = int(_safe_float(os.getenv("OPENBB_CACHE_TTL_SECONDS"), 900))
+        p = str(path or "").lower()
+        if "/derivatives/options/chains" in p:
+            return int(_safe_float(os.getenv("OPENBB_OPTIONS_CACHE_TTL_SECONDS"), 600))
+        if "/economy/fred_series" in p:
+            return int(_safe_float(os.getenv("OPENBB_FRED_CACHE_TTL_SECONDS"), 3600))
+        if "/equity/fundamental/filings" in p or "/equity/ownership/insider_trading" in p:
+            return int(_safe_float(os.getenv("OPENBB_SEC_CACHE_TTL_SECONDS"), 900))
+        if "/etf/info" in p:
+            return int(_safe_float(os.getenv("OPENBB_ETF_INFO_CACHE_TTL_SECONDS"), 86400))
+        if "/etf/" in p:
+            return int(_safe_float(os.getenv("OPENBB_ETF_CACHE_TTL_SECONDS"), 3600))
+        if "/regulators/cftc/cot" in p:
+            return int(_safe_float(os.getenv("OPENBB_CFTC_CACHE_TTL_SECONDS"), 86400))
+        if "/derivatives/futures" in p:
+            return int(_safe_float(os.getenv("OPENBB_FUTURES_CACHE_TTL_SECONDS"), 300))
+        return max(0, default_ttl)
+
+    @classmethod
+    def _openbb_cache_key(cls, path: str, params: dict[str, Any]) -> str:
+        payload = json.dumps(
+            {"path": str(path or ""), "params": {str(k): str(v) for k, v in sorted((params or {}).items())}},
+            sort_keys=True,
+            ensure_ascii=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _openbb_cache_params(path: str, params: dict[str, Any]) -> dict[str, Any]:
+        out = dict(params or {})
+        provider = str(out.get("provider") or "").strip().lower()
+        p = str(path or "").lower()
+        if provider == "fmp" or "/etf/" in p:
+            key = str(os.getenv("FMP_API_KEY") or os.getenv("API_KEY_FINANCIALMODELINGPREP") or "").strip()
+            out["__fmp_key_fp"] = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12] if key else "missing"
+        return out
+
+    @classmethod
+    def _openbb_cache_get(cls, path: str, params: dict[str, Any], ttl: int) -> Any:
+        if ttl <= 0 or not cls._openbb_cache_enabled():
+            return None
+        try:
+            cache_dir = cls._openbb_cache_dir()
+            fp = cache_dir / f"{cls._openbb_cache_key(path, params)}.json"
+            if not fp.exists():
+                return None
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            ts = _safe_float(data.get("ts"), 0.0) if isinstance(data, dict) else 0.0
+            if time.time() - ts > ttl:
+                return None
+            return data.get("payload") if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    @classmethod
+    def _openbb_cache_set(cls, path: str, params: dict[str, Any], payload: Any) -> None:
+        if not cls._openbb_cache_enabled():
+            return
+        try:
+            cache_dir = cls._openbb_cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            fp = cache_dir / f"{cls._openbb_cache_key(path, params)}.json"
+            tmp = fp.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"ts": time.time(), "payload": payload}, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(fp)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _fmp_api_key() -> str:
+        return str(os.getenv("FMP_API_KEY") or os.getenv("API_KEY_FINANCIALMODELINGPREP") or "").strip()
+
+    @staticmethod
+    def _fmp_probe_url(url: str) -> dict[str, Any]:
+        started = time.time()
+        if not OpenBBClient._fmp_api_key():
+            return {"ok": False, "configured": False, "reason": "empty_or_fmp_key_missing"}
+        try:
+            req = urllib.request.Request(str(url), headers={"User-Agent": "MultiTrading/diagnostic"})
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                status = int(getattr(resp, "status", 0) or 0)
+                raw = resp.read(4096).decode("utf-8", errors="ignore").strip()
+            count: int | None = None
+            payload_type = "raw"
+            try:
+                data = json.loads(raw) if raw else None
+                payload_type = type(data).__name__
+                if isinstance(data, list):
+                    count = len(data)
+                elif isinstance(data, dict):
+                    for key in ("data", "results", "items"):
+                        if isinstance(data.get(key), list):
+                            count = len(data[key])
+                            break
+            except Exception:
+                pass
+            reason = ""
+            if status != 200:
+                reason = f"fmp_http_{status}"
+            elif raw in {"", "[]", "{}"} or count == 0:
+                reason = "empty_fmp_response"
+            return {
+                "ok": status == 200 and reason == "",
+                "configured": True,
+                "status": status,
+                "reason": reason,
+                "count": count,
+                "payload_type": payload_type,
+                "elapsed_ms": round((time.time() - started) * 1000.0, 1),
+            }
+        except urllib.error.HTTPError as e:
+            status = int(getattr(e, "code", 0) or 0)
+            reason = {
+                401: "fmp_key_unauthorized",
+                402: "fmp_payment_required",
+                403: "fmp_forbidden",
+                404: "fmp_endpoint_not_found",
+            }.get(status, f"fmp_http_{status}" if status else "fmp_http_error")
+            return {
+                "ok": False,
+                "configured": True,
+                "status": status,
+                "reason": reason,
+                "elapsed_ms": round((time.time() - started) * 1000.0, 1),
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "configured": True,
+                "reason": "fmp_request_failed",
+                "error": str(e),
+                "elapsed_ms": round((time.time() - started) * 1000.0, 1),
+            }
+
+    @staticmethod
+    def _fmp_status_reason(url: str) -> str:
+        probe = OpenBBClient._fmp_probe_url(url)
+        return str(probe.get("reason") or ("empty_openbb_fmp_response" if probe.get("ok") else "fmp_request_failed"))
+
+    @staticmethod
+    def _secret_fingerprint(value: str) -> str:
+        raw = str(value or "").strip()
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10] if raw else ""
+
+    def provider_capability_probe(self) -> dict[str, Any]:
+        health = self.ensure_available()
+        fmp_key = self._fmp_api_key()
+        fred_key = str(os.getenv("FRED_API_KEY") or "").strip()
+        capabilities: dict[str, Any] = {
+            "openbb_api": {
+                "ok": bool(health.get("ok")),
+                "reason": health.get("reason") or "",
+                "base_url": self.base_url,
+            },
+            "credentials": {
+                "fmp": {"configured": bool(fmp_key), "fingerprint": self._secret_fingerprint(fmp_key)},
+                "fred": {"configured": bool(fred_key), "fingerprint": self._secret_fingerprint(fred_key)},
+            },
+        }
+        if fmp_key:
+            safe_key = urllib.parse.quote(fmp_key)
+            capabilities["fmp_profile"] = self._fmp_probe_url(
+                f"https://financialmodelingprep.com/stable/profile?symbol=SPY&apikey={safe_key}"
+            )
+            capabilities["fmp_etf_holdings"] = self._fmp_probe_url(
+                f"https://financialmodelingprep.com/stable/etf/holdings?symbol=SPY&apikey={safe_key}"
+            )
+            capabilities["fmp_etf_sectors"] = self._fmp_probe_url(
+                f"https://financialmodelingprep.com/stable/etf/sector-weightings?symbol=SPY&apikey={safe_key}"
+            )
+        else:
+            capabilities["fmp_profile"] = {"ok": False, "configured": False, "reason": "empty_or_fmp_key_missing"}
+            capabilities["fmp_etf_holdings"] = {"ok": False, "configured": False, "reason": "empty_or_fmp_key_missing"}
+            capabilities["fmp_etf_sectors"] = {"ok": False, "configured": False, "reason": "empty_or_fmp_key_missing"}
+
+        if health.get("ok"):
+            try:
+                sec = self.sec_disclosure_summary("NVDA.US", limit=1)
+                capabilities["sec"] = {
+                    "ok": bool(sec.get("available")),
+                    "symbol": sec.get("symbol"),
+                    "query_symbol": sec.get("query_symbol"),
+                    "filings_count": (sec.get("filings") or {}).get("count"),
+                    "insider_count": (sec.get("insider_trading") or {}).get("count"),
+                    "reason": (sec.get("filings") or {}).get("reason") or (sec.get("insider_trading") or {}).get("reason") or "",
+                }
+            except Exception as e:
+                capabilities["sec"] = {"ok": False, "reason": "sec_probe_failed", "error": str(e)}
+            try:
+                macro = self.macro_indicators()
+                capabilities["fred"] = {
+                    "ok": bool(macro.get("available")),
+                    "available_count": macro.get("available_count"),
+                    "total_count": macro.get("total_count"),
+                    "reason": macro.get("reason") or "",
+                }
+            except Exception as e:
+                capabilities["fred"] = {"ok": False, "reason": "fred_probe_failed", "error": str(e)}
+            try:
+                cftc = self.cftc_cot_summary(cftc_id="209742", report_type="financial", days=90)
+                capabilities["cftc"] = {
+                    "ok": bool(cftc.get("available")),
+                    "date": cftc.get("latest_date"),
+                    "reason": cftc.get("reason") or "",
+                }
+            except Exception as e:
+                capabilities["cftc"] = {"ok": False, "reason": "cftc_probe_failed", "error": str(e)}
+        return {
+            "enabled": self.enabled,
+            "base_url": self.base_url,
+            "timeout_seconds": self.timeout,
+            "health": health,
+            "process": self.process_status(),
+            "cache": {
+                "enabled": self._openbb_cache_enabled(),
+                "path": str(self._openbb_cache_dir()),
+                "entries": len(list(self._openbb_cache_dir().glob("*.json"))) if self._openbb_cache_dir().exists() else 0,
+            },
+            "capabilities": capabilities,
+            "as_of": datetime.now().isoformat(),
+        }
+
+    @staticmethod
+    def _extract_series_points(rows: list[dict[str, Any]], symbol: str) -> list[dict[str, Any]]:
+        key = str(symbol or "").strip().upper()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            date_s = str(row.get("date") or row.get("datetime") or row.get("timestamp") or "").strip()
+            val = _safe_float(row.get(key), default=float("nan"))
+            if not math.isfinite(val):
+                for k, v in row.items():
+                    if str(k).lower() in {"date", "datetime", "timestamp"}:
+                        continue
+                    val = _safe_float(v, default=float("nan"))
+                    if math.isfinite(val):
+                        break
+            if not math.isfinite(val):
+                continue
+            out.append({"date": date_s, "value": float(val)})
+        out.sort(key=lambda x: OpenBBClient._parse_timestamp(x.get("date")))
+        return out
+
+    @staticmethod
+    def _series_change(points: list[dict[str, Any]], periods: int) -> Optional[float]:
+        if len(points) <= int(periods):
+            return None
+        cur = _safe_float(points[-1].get("value"), default=float("nan"))
+        prev = _safe_float(points[-1 - int(periods)].get("value"), default=float("nan"))
+        if not (math.isfinite(cur) and math.isfinite(prev)):
+            return None
+        return float(cur - prev)
+
+    def _fetch_fred_series(self, symbol: str, start_date: date) -> dict[str, Any]:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return {"symbol": sym, "available": False, "reason": "empty_symbol"}
+        payload = self._openbb_get(
+            "/api/v1/economy/fred_series",
+            {
+                "symbol": sym,
+                "provider": "fred",
+                "start_date": start_date.isoformat(),
+            },
+        )
+        rows = self._extract_rows(payload)
+        points = self._extract_series_points(rows, sym)
+        if not points:
+            warnings = payload.get("warnings") if isinstance(payload, dict) else None
+            return {
+                "symbol": sym,
+                "available": False,
+                "reason": "empty_series",
+                "warnings": warnings,
+            }
+        latest = points[-1]
+        monthly_yoy: Optional[float] = None
+        if sym in {"CPIAUCSL"} and len(points) > 12:
+            cur = _safe_float(points[-1].get("value"), default=float("nan"))
+            prev = _safe_float(points[-13].get("value"), default=float("nan"))
+            if math.isfinite(cur) and math.isfinite(prev) and prev != 0:
+                monthly_yoy = float(cur / prev - 1.0)
+        return {
+            "symbol": sym,
+            "available": True,
+            "date": latest.get("date"),
+            "value": round(_safe_float(latest.get("value")), 6),
+            "change_5": None if self._series_change(points, 5) is None else round(float(self._series_change(points, 5)), 6),
+            "change_20": None if self._series_change(points, 20) is None else round(float(self._series_change(points, 20)), 6),
+            "change_60": None if self._series_change(points, 60) is None else round(float(self._series_change(points, 60)), 6),
+            "yoy": None if monthly_yoy is None else round(monthly_yoy, 6),
+            "observations": len(points),
+        }
+
+    def macro_indicators(self) -> dict[str, Any]:
+        if not self.is_configured():
+            return {"source": "openbb", "provider": "fred", "available": False, "reason": "openbb_disabled"}
+        if not _http_ping(f"{self.base_url}/", timeout=self.timeout):
+            return {"source": "openbb", "provider": "fred", "available": False, "reason": "openbb_unreachable"}
+        start_date = date.today() - timedelta(days=820)
+        symbols = ["DGS10", "DGS2", "T10Y2Y", "FEDFUNDS", "NFCI", "STLFSI4", "CPIAUCSL", "UNRATE"]
+        indicators = {sym: self._fetch_fred_series(sym, start_date=start_date) for sym in symbols}
+        available = sum(1 for row in indicators.values() if isinstance(row, dict) and row.get("available"))
+        return {
+            "source": "openbb",
+            "provider": "fred",
+            "available": available > 0,
+            "available_count": available,
+            "total_count": len(symbols),
+            "as_of": datetime.now().isoformat(),
+            "indicators": indicators,
+            "note": "openbb_macro_indicators_v1",
+        }
+
+    def macro_regime(self) -> dict[str, Any]:
+        macro = self.macro_indicators()
+        if not bool(macro.get("available")):
+            return {
+                "source": "openbb",
+                "provider": "fred",
+                "available": False,
+                "reason": macro.get("reason") or "macro_indicators_unavailable",
+                "regime": "unknown",
+                "macro_indicators": macro,
+            }
+        indicators = macro.get("indicators") if isinstance(macro.get("indicators"), dict) else {}
+
+        def ind(name: str, field: str, default: float = float("nan")) -> float:
+            row = indicators.get(name) if isinstance(indicators, dict) else None
+            return _safe_float(row.get(field), default=default) if isinstance(row, dict) else default
+
+        dgs10 = ind("DGS10", "value")
+        dgs2 = ind("DGS2", "value")
+        spread = ind("T10Y2Y", "value")
+        if not math.isfinite(spread) and math.isfinite(dgs10) and math.isfinite(dgs2):
+            spread = float(dgs10 - dgs2)
+        dgs10_chg_60 = ind("DGS10", "change_60", 0.0)
+        fedfunds = ind("FEDFUNDS", "value")
+        nfci = ind("NFCI", "value")
+        stlfsi4 = ind("STLFSI4", "value")
+        unrate_chg_60 = ind("UNRATE", "change_60", 0.0)
+        cpi_yoy = ind("CPIAUCSL", "yoy")
+
+        risk_score = 0.0
+        reasons: list[str] = []
+        if math.isfinite(spread):
+            if spread < -0.25:
+                risk_score += 0.25
+                reasons.append("yield_curve_deeply_inverted")
+            elif spread < 0:
+                risk_score += 0.15
+                reasons.append("yield_curve_inverted")
+            elif spread > 0.75:
+                risk_score -= 0.08
+                reasons.append("yield_curve_positive")
+        if math.isfinite(dgs10_chg_60):
+            if dgs10_chg_60 > 0.5:
+                risk_score += 0.18
+                reasons.append("long_rate_rising_fast")
+            elif dgs10_chg_60 < -0.5:
+                risk_score += 0.08
+                reasons.append("long_rate_falling_fast")
+        stress = float("nan")
+        if math.isfinite(nfci):
+            stress = nfci
+        elif math.isfinite(stlfsi4):
+            stress = stlfsi4
+        if math.isfinite(stress):
+            if stress > 0.75:
+                risk_score += 0.30
+                reasons.append("financial_stress_high")
+            elif stress > 0:
+                risk_score += 0.14
+                reasons.append("financial_stress_positive")
+            elif stress < -0.5:
+                risk_score -= 0.10
+                reasons.append("financial_conditions_easy")
+        if math.isfinite(fedfunds) and fedfunds > 5.0:
+            risk_score += 0.08
+            reasons.append("policy_rate_restrictive")
+        if math.isfinite(unrate_chg_60) and unrate_chg_60 > 0.3:
+            risk_score += 0.15
+            reasons.append("unemployment_rising")
+        if math.isfinite(cpi_yoy) and cpi_yoy > 0.035:
+            risk_score += 0.08
+            reasons.append("inflation_above_target")
+
+        risk_score = max(0.0, min(1.0, risk_score))
+        if risk_score >= 0.45:
+            regime = "macro_risk_off"
+            confidence = 0.55 + min((risk_score - 0.45) / 0.55, 1.0) * 0.35
+        elif risk_score <= 0.15:
+            regime = "macro_risk_on"
+            confidence = 0.55 + min((0.15 - risk_score) / 0.15, 1.0) * 0.25
+        else:
+            regime = "macro_neutral"
+            confidence = 0.50 + (0.45 - abs(risk_score - 0.30)) * 0.25
+
+        return {
+            "source": "openbb",
+            "provider": "fred",
+            "available": True,
+            "regime": regime,
+            "confidence": round(max(0.05, min(float(confidence), 0.95)), 3),
+            "risk_score": round(float(risk_score), 4),
+            "as_of": datetime.now().isoformat(),
+            "features": {
+                "dgs10": None if not math.isfinite(dgs10) else round(float(dgs10), 4),
+                "dgs2": None if not math.isfinite(dgs2) else round(float(dgs2), 4),
+                "spread_10y2y": None if not math.isfinite(spread) else round(float(spread), 4),
+                "dgs10_change_60": None if not math.isfinite(dgs10_chg_60) else round(float(dgs10_chg_60), 4),
+                "fedfunds": None if not math.isfinite(fedfunds) else round(float(fedfunds), 4),
+                "financial_stress": None if not math.isfinite(stress) else round(float(stress), 4),
+                "unrate_change_60": None if not math.isfinite(unrate_chg_60) else round(float(unrate_chg_60), 4),
+                "cpi_yoy": None if not math.isfinite(cpi_yoy) else round(float(cpi_yoy), 6),
+            },
+            "reasons": reasons or ["macro_conditions_balanced"],
+            "macro_indicators": macro,
+            "note": "openbb_macro_regime_v1",
+        }
+
+    @staticmethod
+    def _normalize_sec_filing(row: dict[str, Any]) -> dict[str, Any]:
+        report_type = str(row.get("report_type") or row.get("form") or "").strip().upper()
+        important_types = {"4", "8-K", "10-Q", "10-K", "S-1", "S-3", "DEF 14A"}
+        return {
+            "filing_date": str(row.get("filing_date") or ""),
+            "report_date": str(row.get("report_date") or ""),
+            "accepted_date": str(row.get("accepted_date") or ""),
+            "report_type": report_type,
+            "description": str(row.get("primary_doc_description") or row.get("description") or ""),
+            "report_url": str(row.get("report_url") or ""),
+            "filing_detail_url": str(row.get("filing_detail_url") or ""),
+            "complete_submission_url": str(row.get("complete_submission_url") or ""),
+            "accession_number": str(row.get("accession_number") or ""),
+            "important": report_type in important_types,
+        }
+
+    @staticmethod
+    def _normalize_insider_trade(row: dict[str, Any]) -> dict[str, Any]:
+        shares = _safe_float(row.get("securities_transacted"), default=float("nan"))
+        price = _safe_float(row.get("transaction_price"), default=float("nan"))
+        value = float("nan")
+        if math.isfinite(shares) and math.isfinite(price):
+            value = float(abs(shares) * price)
+        direction = str(row.get("acquisition_or_disposition") or "").strip()
+        return {
+            "symbol": str(row.get("symbol") or ""),
+            "filing_date": str(row.get("filing_date") or ""),
+            "transaction_date": str(row.get("transaction_date") or ""),
+            "owner_name": str(row.get("owner_name") or ""),
+            "owner_title": str(row.get("owner_title") or ""),
+            "transaction_type": str(row.get("transaction_type") or ""),
+            "acquisition_or_disposition": direction,
+            "security_type": str(row.get("security_type") or ""),
+            "securities_transacted": None if not math.isfinite(shares) else float(shares),
+            "transaction_price": None if not math.isfinite(price) else float(price),
+            "transaction_value": None if not math.isfinite(value) else round(float(value), 2),
+            "filing_url": str(row.get("filing_url") or ""),
+            "officer": bool(row.get("officer")),
+            "form": str(row.get("form") or ""),
+            "important": direction.lower().startswith("dis") and math.isfinite(value) and value >= 1000000.0,
+        }
+
+    def sec_filings(self, symbol: str, limit: int = 5) -> dict[str, Any]:
+        display_sym = str(symbol or "").strip().upper()
+        sym = self._normalize_symbol_for_openbb(display_sym, "us")
+        lim = max(1, min(20, int(limit)))
+        if not sym:
+            return {"symbol": display_sym, "source": "openbb", "provider": "sec", "available": False, "reason": "empty_symbol"}
+        if not self.is_configured():
+            return {"symbol": display_sym, "source": "openbb", "provider": "sec", "available": False, "reason": "openbb_disabled"}
+        if not _http_ping(f"{self.base_url}/", timeout=self.timeout):
+            return {"symbol": display_sym, "source": "openbb", "provider": "sec", "available": False, "reason": "openbb_unreachable"}
+        payload = self._openbb_get(
+            "/api/v1/equity/fundamental/filings",
+            {"symbol": sym, "provider": "sec", "limit": lim},
+        )
+        rows = self._extract_rows(payload)
+        items = [self._normalize_sec_filing(row) for row in rows[:lim]]
+        return {
+            "symbol": display_sym,
+            "query_symbol": sym,
+            "source": "openbb",
+            "provider": "sec",
+            "available": bool(items),
+            "count": len(items),
+            "items": items,
+            "important_count": sum(1 for item in items if bool(item.get("important"))),
+            "reason": "" if items else "empty_filings",
+            "note": "openbb_sec_filings_v1",
+        }
+
+    def sec_insider_trading(self, symbol: str, limit: int = 5) -> dict[str, Any]:
+        display_sym = str(symbol or "").strip().upper()
+        sym = self._normalize_symbol_for_openbb(display_sym, "us")
+        lim = max(1, min(20, int(limit)))
+        if not sym:
+            return {"symbol": display_sym, "source": "openbb", "provider": "sec", "available": False, "reason": "empty_symbol"}
+        if not self.is_configured():
+            return {"symbol": display_sym, "source": "openbb", "provider": "sec", "available": False, "reason": "openbb_disabled"}
+        if not _http_ping(f"{self.base_url}/", timeout=self.timeout):
+            return {"symbol": display_sym, "source": "openbb", "provider": "sec", "available": False, "reason": "openbb_unreachable"}
+        payload = self._openbb_get(
+            "/api/v1/equity/ownership/insider_trading",
+            {"symbol": sym, "provider": "sec", "limit": lim},
+        )
+        rows = self._extract_rows(payload)
+        items = [self._normalize_insider_trade(row) for row in rows[:lim]]
+        return {
+            "symbol": display_sym,
+            "query_symbol": sym,
+            "source": "openbb",
+            "provider": "sec",
+            "available": bool(items),
+            "count": len(items),
+            "items": items,
+            "important_count": sum(1 for item in items if bool(item.get("important"))),
+            "reason": "" if items else "empty_insider_trading",
+            "note": "openbb_sec_insider_trading_v1",
+        }
+
+    def sec_disclosure_summary(self, symbol: str, limit: int = 5) -> dict[str, Any]:
+        filings = self.sec_filings(symbol=symbol, limit=limit)
+        insider = self.sec_insider_trading(symbol=symbol, limit=limit)
+        sym = str(symbol or "").strip().upper()
+        return {
+            "symbol": sym,
+            "query_symbol": self._normalize_symbol_for_openbb(sym, "us"),
+            "source": "openbb",
+            "provider": "sec",
+            "available": bool(filings.get("available") or insider.get("available")),
+            "filings": filings,
+            "insider_trading": insider,
+            "important_count": int(filings.get("important_count") or 0) + int(insider.get("important_count") or 0),
+            "note": "openbb_sec_disclosure_summary_v1",
+        }
+
+    def sec_disclosures(self, symbols: list[str], limit: int = 5, max_symbols: int = 5) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in list(symbols or []):
+            sym = str(raw or "").strip().upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(self.sec_disclosure_summary(symbol=sym, limit=limit))
+            if len(out) >= max(1, int(max_symbols)):
+                break
+        return out
+
+    @staticmethod
+    def _normalize_etf_info(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "symbol": str(row.get("symbol") or ""),
+            "name": str(row.get("name") or ""),
+            "category": str(row.get("category") or ""),
+            "fund_family": str(row.get("fund_family") or ""),
+            "exchange": str(row.get("exchange") or ""),
+            "currency": str(row.get("currency") or ""),
+            "total_assets": _safe_float(row.get("total_assets"), default=0.0),
+            "nav_price": _safe_float(row.get("nav_price"), default=float("nan")),
+            "trailing_pe": _safe_float(row.get("trailing_pe"), default=float("nan")),
+            "dividend_yield": _safe_float(row.get("dividend_yield"), default=float("nan")),
+            "return_ytd": _safe_float(row.get("return_ytd"), default=float("nan")),
+            "return_3y_avg": _safe_float(row.get("return_3y_avg"), default=float("nan")),
+            "return_5y_avg": _safe_float(row.get("return_5y_avg"), default=float("nan")),
+            "beta_3y_avg": _safe_float(row.get("beta_3y_avg"), default=float("nan")),
+            "ma_50d": _safe_float(row.get("ma_50d"), default=float("nan")),
+            "ma_200d": _safe_float(row.get("ma_200d"), default=float("nan")),
+        }
+
+    @staticmethod
+    def _normalize_weight_row(row: dict[str, Any]) -> dict[str, Any]:
+        weight = float("nan")
+        for key in ("weight", "weight_pct", "percentage", "percent", "portfolio_weight"):
+            if key in row:
+                weight = _safe_float(row.get(key), default=float("nan"))
+                break
+        return {
+            "symbol": str(row.get("symbol") or row.get("holding_symbol") or row.get("asset") or ""),
+            "name": str(row.get("name") or row.get("holding_name") or row.get("sector") or row.get("industry") or ""),
+            "weight": None if not math.isfinite(weight) else round(float(weight), 6),
+        }
+
+    def etf_info(self, symbol: str) -> dict[str, Any]:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return {"symbol": sym, "source": "openbb", "available": False, "reason": "empty_symbol"}
+        if not self.is_configured():
+            return {"symbol": sym, "source": "openbb", "available": False, "reason": "openbb_disabled"}
+        if not _http_ping(f"{self.base_url}/", timeout=self.timeout):
+            return {"symbol": sym, "source": "openbb", "available": False, "reason": "openbb_unreachable"}
+        payload = self._openbb_get("/api/v1/etf/info", {"symbol": sym, "provider": "yfinance"})
+        rows = self._extract_rows(payload)
+        if not rows:
+            return {"symbol": sym, "source": "openbb", "provider": "yfinance", "available": False, "reason": "empty_etf_info"}
+        info = self._normalize_etf_info(rows[0])
+        return {
+            "symbol": sym,
+            "source": "openbb",
+            "provider": "yfinance",
+            "available": True,
+            "info": info,
+            "note": "openbb_etf_info_v1",
+        }
+
+    def etf_sectors(self, symbol: str) -> dict[str, Any]:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return {"symbol": sym, "source": "openbb", "provider": "fmp", "available": False, "reason": "empty_symbol"}
+        payload = self._openbb_get("/api/v1/etf/sectors", {"symbol": sym, "provider": "fmp"})
+        rows = self._extract_rows(payload)
+        items = [self._normalize_weight_row(row) for row in rows]
+        reason = ""
+        if not items:
+            key = self._fmp_api_key()
+            reason = (
+                self._fmp_status_reason(
+                    f"https://financialmodelingprep.com/stable/etf/sector-weightings?symbol={urllib.parse.quote(sym)}&apikey={urllib.parse.quote(key)}"
+                )
+                if key
+                else "empty_or_fmp_key_missing"
+            )
+        return {
+            "symbol": sym,
+            "source": "openbb",
+            "provider": "fmp",
+            "available": bool(items),
+            "items": items,
+            "count": len(items),
+            "reason": reason,
+            "note": "openbb_etf_sectors_v1",
+        }
+
+    def etf_holdings(self, symbol: str, limit: int = 10) -> dict[str, Any]:
+        sym = str(symbol or "").strip().upper()
+        lim = max(1, min(50, int(limit)))
+        if not sym:
+            return {"symbol": sym, "source": "openbb", "provider": "fmp", "available": False, "reason": "empty_symbol"}
+        payload = self._openbb_get("/api/v1/etf/holdings", {"symbol": sym, "provider": "fmp"})
+        rows = self._extract_rows(payload)
+        items = [self._normalize_weight_row(row) for row in rows[:lim]]
+        reason = ""
+        if not items:
+            key = self._fmp_api_key()
+            reason = (
+                self._fmp_status_reason(
+                    f"https://financialmodelingprep.com/stable/etf/holdings?symbol={urllib.parse.quote(sym)}&apikey={urllib.parse.quote(key)}"
+                )
+                if key
+                else "empty_or_fmp_key_missing"
+            )
+        return {
+            "symbol": sym,
+            "source": "openbb",
+            "provider": "fmp",
+            "available": bool(items),
+            "items": items,
+            "count": len(items),
+            "reason": reason,
+            "note": "openbb_etf_holdings_v1",
+        }
+
+    def etf_exposure_summary(self, symbol: str, holdings_limit: int = 10) -> dict[str, Any]:
+        info = self.etf_info(symbol=symbol)
+        sectors = self.etf_sectors(symbol=symbol)
+        holdings = self.etf_holdings(symbol=symbol, limit=holdings_limit)
+        sym = str(symbol or "").strip().upper()
+        return {
+            "symbol": sym,
+            "source": "openbb",
+            "available": bool(info.get("available") or sectors.get("available") or holdings.get("available")),
+            "info": info,
+            "sectors": sectors,
+            "holdings": holdings,
+            "note": "openbb_etf_exposure_summary_v1",
+        }
+
+    def etf_exposures(self, symbols: list[str], holdings_limit: int = 10, max_symbols: int = 4) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in list(symbols or []):
+            sym = str(raw or "").strip().upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(self.etf_exposure_summary(symbol=sym, holdings_limit=holdings_limit))
+            if len(out) >= max(1, int(max_symbols)):
+                break
+        return out
+
+    @staticmethod
+    def _normalize_option_contract(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "contract_symbol": str(row.get("contract_symbol") or ""),
+            "expiration": str(row.get("expiration") or ""),
+            "dte": int(_safe_float(row.get("dte"), default=0.0)),
+            "strike": _safe_float(row.get("strike"), default=float("nan")),
+            "option_type": str(row.get("option_type") or ""),
+            "volume": int(_safe_float(row.get("volume"), default=0.0)),
+            "open_interest": int(_safe_float(row.get("open_interest"), default=0.0)),
+            "bid": _safe_float(row.get("bid"), default=float("nan")),
+            "ask": _safe_float(row.get("ask"), default=float("nan")),
+            "last_trade_price": _safe_float(row.get("last_trade_price"), default=float("nan")),
+            "implied_volatility": _safe_float(row.get("implied_volatility"), default=float("nan")),
+            "in_the_money": bool(row.get("in_the_money")),
+        }
+
+    def options_chain_summary(self, symbol: str, top: int = 10) -> dict[str, Any]:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return {"symbol": sym, "source": "openbb", "provider": "yfinance", "available": False, "reason": "empty_symbol"}
+        if not self.is_configured():
+            return {"symbol": sym, "source": "openbb", "provider": "yfinance", "available": False, "reason": "openbb_disabled"}
+        if not _http_ping(f"{self.base_url}/", timeout=self.timeout):
+            return {"symbol": sym, "source": "openbb", "provider": "yfinance", "available": False, "reason": "openbb_unreachable"}
+        payload = self._openbb_get(
+            "/api/v1/derivatives/options/chains",
+            {"symbol": sym, "provider": "yfinance"},
+            timeout=max(45.0, float(self.timeout)),
+        )
+        rows = self._extract_rows(payload)
+        if not rows:
+            return {"symbol": sym, "source": "openbb", "provider": "yfinance", "available": False, "reason": "empty_options_chain"}
+        underlying = _safe_float(rows[0].get("underlying_price"), default=float("nan")) if isinstance(rows[0], dict) else float("nan")
+        calls = [r for r in rows if str(r.get("option_type") or "").lower() == "call"]
+        puts = [r for r in rows if str(r.get("option_type") or "").lower() == "put"]
+        call_volume = sum(max(0, int(_safe_float(r.get("volume"), 0.0))) for r in calls)
+        put_volume = sum(max(0, int(_safe_float(r.get("volume"), 0.0))) for r in puts)
+        call_oi = sum(max(0, int(_safe_float(r.get("open_interest"), 0.0))) for r in calls)
+        put_oi = sum(max(0, int(_safe_float(r.get("open_interest"), 0.0))) for r in puts)
+        expirations = sorted(
+            {
+                str(r.get("expiration") or ""): int(_safe_float(r.get("dte"), 9999.0))
+                for r in rows
+                if str(r.get("expiration") or "")
+            }.items(),
+            key=lambda x: x[1],
+        )
+        near_rows = [r for r in rows if int(_safe_float(r.get("dte"), 9999.0)) <= 1]
+        top_volume = sorted(rows, key=lambda r: _safe_float(r.get("volume"), 0.0), reverse=True)[: max(1, min(20, int(top)))]
+        return {
+            "symbol": sym,
+            "source": "openbb",
+            "provider": "yfinance",
+            "available": True,
+            "underlying_price": None if not math.isfinite(underlying) else round(float(underlying), 4),
+            "total_contracts": len(rows),
+            "expiration_count": len(expirations),
+            "nearest_expiration": expirations[0][0] if expirations else "",
+            "nearest_dte": expirations[0][1] if expirations else None,
+            "near_dte_contracts": len(near_rows),
+            "call_volume": call_volume,
+            "put_volume": put_volume,
+            "put_call_volume_ratio": None if call_volume <= 0 else round(float(put_volume / call_volume), 4),
+            "call_open_interest": call_oi,
+            "put_open_interest": put_oi,
+            "put_call_oi_ratio": None if call_oi <= 0 else round(float(put_oi / call_oi), 4),
+            "expirations": [{"expiration": exp, "dte": dte} for exp, dte in expirations[:8]],
+            "top_volume": [self._normalize_option_contract(row) for row in top_volume],
+            "note": "openbb_options_chain_summary_v1",
+        }
+
+    def futures_curve(self, symbol: str) -> dict[str, Any]:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return {"symbol": sym, "source": "openbb", "provider": "yfinance", "available": False, "reason": "empty_symbol"}
+        payload = self._openbb_get(
+            "/api/v1/derivatives/futures/curve",
+            {"symbol": sym, "provider": "yfinance"},
+            timeout=max(15.0, float(self.timeout)),
+        )
+        rows = self._extract_rows(payload)
+        items = [
+            {
+                "expiration": str(row.get("expiration") or ""),
+                "price": _safe_float(row.get("price"), default=float("nan")),
+            }
+            for row in rows
+        ]
+        items = [x for x in items if x.get("expiration") and math.isfinite(_safe_float(x.get("price"), float("nan")))]
+        items.sort(key=lambda x: str(x.get("expiration") or ""))
+        front = _safe_float(items[0].get("price"), default=float("nan")) if items else float("nan")
+        back = _safe_float(items[-1].get("price"), default=float("nan")) if items else float("nan")
+        return {
+            "symbol": sym,
+            "source": "openbb",
+            "provider": "yfinance",
+            "available": bool(items),
+            "count": len(items),
+            "items": items,
+            "curve_spread": None if not (math.isfinite(front) and math.isfinite(back)) else round(float(back - front), 4),
+            "reason": "" if items else "empty_futures_curve",
+            "note": "openbb_futures_curve_v1",
+        }
+
+    def cftc_cot_summary(self, cftc_id: str = "209742", report_type: str = "financial", days: int = 180) -> dict[str, Any]:
+        cid = str(cftc_id or "209742").strip()
+        start = date.today() - timedelta(days=max(30, min(730, int(days))))
+        payload = self._openbb_get(
+            "/api/v1/regulators/cftc/cot",
+            {"id": cid, "provider": "cftc", "report_type": str(report_type or "financial"), "start_date": start.isoformat()},
+        )
+        rows = self._extract_rows(payload)
+        if not rows:
+            return {"id": cid, "source": "openbb", "provider": "cftc", "available": False, "reason": "empty_cot"}
+        rows = sorted(rows, key=lambda r: self._parse_timestamp(r.get("date")))
+        latest = rows[-1]
+        lev_long = _safe_float(latest.get("lev_money_positions_long"), default=float("nan"))
+        lev_short = _safe_float(latest.get("lev_money_positions_short"), default=float("nan"))
+        asset_long = _safe_float(latest.get("asset_mgr_positions_long"), default=float("nan"))
+        asset_short = _safe_float(latest.get("asset_mgr_positions_short"), default=float("nan"))
+        open_interest = _safe_float(latest.get("open_interest_all"), default=float("nan"))
+        lev_net = None if not (math.isfinite(lev_long) and math.isfinite(lev_short)) else float(lev_long - lev_short)
+        asset_net = None if not (math.isfinite(asset_long) and math.isfinite(asset_short)) else float(asset_long - asset_short)
+        return {
+            "id": cid,
+            "source": "openbb",
+            "provider": "cftc",
+            "available": True,
+            "date": str(latest.get("date") or ""),
+            "market": str(latest.get("market_and_exchange_names") or latest.get("contract_market_name") or ""),
+            "open_interest": None if not math.isfinite(open_interest) else int(open_interest),
+            "leveraged_money_net": None if lev_net is None else int(lev_net),
+            "asset_manager_net": None if asset_net is None else int(asset_net),
+            "leveraged_money_net_oi": None if lev_net is None or not math.isfinite(open_interest) or open_interest <= 0 else round(float(lev_net / open_interest), 6),
+            "asset_manager_net_oi": None if asset_net is None or not math.isfinite(open_interest) or open_interest <= 0 else round(float(asset_net / open_interest), 6),
+            "observations": len(rows),
+            "note": "openbb_cftc_cot_summary_v1",
+        }
+
+    def derivatives_risk_summary(self, symbol: str = "QQQ") -> dict[str, Any]:
+        sym = str(symbol or "QQQ").strip().upper()
+        futures_symbol = "ES"
+        cftc_id = "209742" if sym in {"QQQ", "NDX", "NASDAQ", "NASDAQ100"} else "13874A"
+        options = self.options_chain_summary(symbol=sym, top=10)
+        futures = self.futures_curve(symbol=futures_symbol)
+        cot = self.cftc_cot_summary(cftc_id=cftc_id, report_type="financial", days=180)
+        return {
+            "symbol": sym,
+            "source": "openbb",
+            "available": bool(options.get("available") or futures.get("available") or cot.get("available")),
+            "options": options,
+            "futures_curve": futures,
+            "cot": cot,
+            "note": "openbb_derivatives_risk_summary_v1",
+        }
 
     def _fetch_daily_closes(self, symbol: str, bars: int = 180) -> list[float]:
         sym = urllib.parse.quote_plus(str(symbol or "").strip())

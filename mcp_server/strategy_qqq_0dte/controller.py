@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Sequence
 
-from backtest_engine import Bar
+try:
+    from mcp_server.backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
 from .config import Qqq0dteConfig
 from .confirmation import breakout_confirmed, reversal_after_zone_touch

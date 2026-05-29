@@ -36,6 +36,7 @@ def build_setup_config_response(
                     "TWELVE_DATA_API_KEY",
                     "TWELVEDATA_API_KEY",
                     "FRED_API_KEY",
+                    "FMP_API_KEY",
                     "COINGECKO_API_KEY",
                 )
             ),
@@ -69,6 +70,7 @@ def build_setup_config_response(
             "polygon_api_key": mask_secret(env_data.get("POLYGON_API_KEY", "")),
             "twelve_data_api_key": mask_secret(twelve_data_val),
             "fred_api_key": mask_secret(env_data.get("FRED_API_KEY", "")),
+            "fmp_api_key": mask_secret(env_data.get("FMP_API_KEY", "")),
             "coingecko_api_key": mask_secret(env_data.get("COINGECKO_API_KEY", "")),
             "openclaw_mcp_max_level": env_data.get("OPENCLAW_MCP_MAX_LEVEL", "L2"),
             "openclaw_mcp_allow_l3": env_data.get("OPENCLAW_MCP_ALLOW_L3", "false"),

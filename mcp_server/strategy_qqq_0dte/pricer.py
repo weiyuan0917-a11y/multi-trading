@@ -4,9 +4,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Sequence
 
-from backtest_engine import Bar
+try:
+    from mcp_server.backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
-from synthetic_option_pricing import black_scholes_european, periods_per_year_for_kline, rolling_sigma_annualized
+try:
+    from mcp_server.synthetic_option_pricing import black_scholes_european, periods_per_year_for_kline, rolling_sigma_annualized
+except ImportError:
+    from synthetic_option_pricing import black_scholes_european, periods_per_year_for_kline, rolling_sigma_annualized
 
 from .config import Qqq0dteConfig
 from .session_us import option_expiry_datetime, to_ny

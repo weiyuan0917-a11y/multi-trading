@@ -4,7 +4,7 @@ from pathlib import Path
 from config.env_loader import load_project_env
 
 # 通过 env_loader 加载根 .env（可为占位）并合并用户 davies 的 data/user_env 文件。
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[1]).resolve()
 load_project_env(_ROOT)
 
 

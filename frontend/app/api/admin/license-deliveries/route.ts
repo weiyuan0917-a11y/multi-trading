@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { ADMIN_EDITION_ENABLED } from "@/lib/edition";
+import { customerDisabledResponse, isCustomerBuild } from "@/lib/build-target";
 
 const LOCAL_AGENT_API_BASE =
   process.env.NEXT_PUBLIC_LOCAL_AGENT_API_BASE ||
@@ -76,7 +76,7 @@ async function callConvex(path: string, init?: RequestInit) {
 }
 
 export async function GET(request: NextRequest) {
-  if (!ADMIN_EDITION_ENABLED) return json(404, { ok: false, error: "not_found" });
+  if (isCustomerBuild()) return customerDisabledResponse();
   const admin = await requireAdmin(request);
   if (!admin.ok) return admin.response;
   try {
@@ -92,7 +92,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  if (!ADMIN_EDITION_ENABLED) return json(404, { ok: false, error: "not_found" });
+  if (isCustomerBuild()) return customerDisabledResponse();
   const admin = await requireAdmin(request);
   if (!admin.ok) return admin.response;
   let body: any;

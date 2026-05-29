@@ -4,7 +4,10 @@ from __future__ import annotations
 from itertools import product
 from typing import Any
 
-from backtest_engine import Bar
+try:
+    from mcp_server.backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
 from .backtest import run_qqq_0dte_backtest
 from .config import Qqq0dteConfig

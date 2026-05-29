@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Sequence
 
-from backtest_engine import Bar
+try:
+    from .backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
 Right = Literal["C", "P", "call", "put"]
 

@@ -4,9 +4,15 @@ from __future__ import annotations
 from collections import Counter, deque
 from typing import Any, Sequence
 
-from backtest_engine import Bar
+try:
+    from mcp_server.backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
-from fee_model import estimate_us_option_multi_leg_fee
+try:
+    from mcp_server.fee_model import estimate_us_option_multi_leg_fee
+except ImportError:
+    from fee_model import estimate_us_option_multi_leg_fee
 
 from .config import Qqq0dteConfig
 from .controller import StrategyController, _apply_double_strangle_leg_closed_to_pos, _apply_strangle_leg_closed_to_pos

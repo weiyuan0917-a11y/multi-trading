@@ -28,15 +28,6 @@ The script uses `pytest` when available and falls back to `unittest discover`.
 It also runs the frontend type check through `cmd /c npm run lint`, which avoids
 PowerShell execution-policy failures on `npm.ps1`.
 
-Default local ports are:
-
-- FastAPI Local Agent: `127.0.0.1:8010`
-- Next.js frontend: `127.0.0.1:3010`
-
-On Windows, uvicorn may appear as a parent/child process group. When debugging a
-stuck backend, prefer checking the port listener and `/health`; do not kill every
-uvicorn-like process unless you have confirmed it belongs to this workspace.
-
 ## Live-Trading Safety Switches
 
 The shared broker submit path supports these environment variables:

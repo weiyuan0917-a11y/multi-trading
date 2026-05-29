@@ -5,7 +5,10 @@ strategies.py - 内置回测策略
 from __future__ import annotations
 import inspect
 from typing import Any
-from backtest_engine import Bar
+try:
+    from .backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
 
 # ============================================================

@@ -11,7 +11,10 @@ from typing import Any
 import requests
 
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.abspath(
+    os.getenv("MULTITRADING_ROOT")
+    or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 KLINE_CACHE_DIR = os.path.join(ROOT, "data", "klines")
 
 SCHEMA = "cn_market_data.v1"

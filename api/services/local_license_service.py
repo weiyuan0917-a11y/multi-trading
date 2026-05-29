@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.abspath(
+    os.getenv("MULTITRADING_ROOT")
+    or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 _AUTH_DATA_DIR = os.path.join(_ROOT, "data", "auth")
 _LOCAL_LICENSES_FILE = os.path.join(_AUTH_DATA_DIR, "local_licenses.json")
 _LOCK = threading.RLock()
@@ -272,6 +275,12 @@ def _signature_algorithm_and_value(license_data: dict[str, Any]) -> tuple[str, s
         "rsa-pss": "rsa-pss-sha256",
         "rsa-pss-sha256": "rsa-pss-sha256",
         "rsassa-pss-sha256": "rsa-pss-sha256",
+        "rsa-pkcs1": "rsassa-pkcs1-v1-5-sha256",
+        "rsa-pkcs1-sha256": "rsassa-pkcs1-v1-5-sha256",
+        "rsassa-pkcs1": "rsassa-pkcs1-v1-5-sha256",
+        "rsassa-pkcs1-sha256": "rsassa-pkcs1-v1-5-sha256",
+        "rsassa-pkcs1-v1-5-sha256": "rsassa-pkcs1-v1-5-sha256",
+        "rsassa-pkcs1-v1.5-sha256": "rsassa-pkcs1-v1-5-sha256",
     }
     if "=" in signature:
         prefix, value = signature.split("=", 1)
@@ -352,6 +361,31 @@ def _verify_rsa_pss_signature(license_data: dict[str, Any], signature: str) -> t
         return False, "invalid_public_key_or_signature"
 
 
+def _verify_rsa_pkcs1_signature(license_data: dict[str, Any], signature: str) -> tuple[bool, str]:
+    public_pem = _license_public_key_pem()
+    if not public_pem:
+        return False, "missing_public_key"
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+    except Exception:
+        return False, "missing_crypto_backend"
+    try:
+        public_key = serialization.load_pem_public_key(public_pem.encode("utf-8"))
+        public_key.verify(
+            _decode_base64_signature(signature),
+            _signature_payload(license_data).encode("utf-8"),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+        return True, "valid_rsa_pkcs1_signature"
+    except InvalidSignature:
+        return False, "invalid_signature"
+    except Exception:
+        return False, "invalid_public_key_or_signature"
+
+
 def _verify_signature(license_data: dict[str, Any]) -> tuple[bool, str]:
     signature = str(license_data.get("signature") or "").strip()
     allow_unsigned = normalize_bool(_root_env_value("LOCAL_LICENSE_ALLOW_UNSIGNED") or "false")
@@ -362,6 +396,8 @@ def _verify_signature(license_data: dict[str, Any]) -> tuple[bool, str]:
         return _verify_hmac_signature(license_data, supplied)
     if alg == "rsa-pss-sha256":
         return _verify_rsa_pss_signature(license_data, supplied)
+    if alg == "rsassa-pkcs1-v1-5-sha256":
+        return _verify_rsa_pkcs1_signature(license_data, supplied)
     return False, "unsupported_signature_alg"
 
 

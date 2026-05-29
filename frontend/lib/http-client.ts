@@ -17,6 +17,22 @@ const DEFAULT_RETRIES = 3;
 const DEFAULT_GET_CACHE_TTL_MS = 15000;
 const memoryGetCache = new Map<string, { expiresAt: number; data: unknown }>();
 
+export class JsonApiError extends Error {
+  status: number;
+  url: string;
+
+  constructor(message: string, status: number, url: string) {
+    super(message);
+    this.name = "JsonApiError";
+    this.status = status;
+    this.url = url;
+  }
+}
+
+export function getJsonApiErrorStatus(error: unknown): number {
+  return error instanceof JsonApiError ? error.status : 0;
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function normalizeBaseUrl(value: string): string {
@@ -170,7 +186,7 @@ export function createJsonApiClient(config: JsonApiClientConfig) {
           });
           clearTimeout(timer);
           if (!res.ok) {
-            throw new Error(normalizeErrorMessage(await res.text()));
+            throw new JsonApiError(normalizeErrorMessage(await res.text()), res.status, url);
           }
           const raw = await res.text();
           const data = (raw ? JSON.parse(raw) : {}) as T;

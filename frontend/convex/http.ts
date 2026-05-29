@@ -25,6 +25,17 @@ type ManualOrderResult = RecordLicenseResult & {
   order: any;
 };
 
+type FeishuNotifyResult = {
+  ok: boolean;
+  skipped?: boolean;
+  channel?: string;
+  reason?: string;
+  status?: number;
+  response?: any;
+  fallbackFrom?: any;
+  error?: string;
+};
+
 function jsonResponse(status: number, body: any) {
   return new Response(JSON.stringify(body), {
     status,
@@ -70,6 +81,167 @@ function firstPaymentProvider(...values: unknown[]) {
   if (raw === "alipay_qr") return "alipay_qr";
   if (raw === "aggregate_qr") return "aggregate_qr";
   return "manual_qr";
+}
+
+function paymentMethodLabel(value: unknown) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "wechat") return "微信";
+  if (raw === "alipay") return "支付宝";
+  if (raw === "wise") return "Wise";
+  return raw || "其他";
+}
+
+function paymentProviderLabel(value: unknown) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "manual_qr") return "静态码半自动";
+  if (raw === "wechat_native") return "微信 Native";
+  if (raw === "alipay_qr") return "支付宝二维码";
+  if (raw === "aggregate_qr") return "聚合支付";
+  return raw || "-";
+}
+
+function billingCycleLabel(value: unknown) {
+  return String(value || "").trim().toLowerCase() === "year" ? "年付" : "月付";
+}
+
+function orderMoneyLabel(order: any) {
+  const amount = Number(order?.amount ?? order?.amountCny ?? order?.amountHkd ?? 0);
+  const currency = String(order?.currency || "CNY").trim() || "CNY";
+  return `${currency} ${amount.toLocaleString("zh-CN")}`;
+}
+
+function formatShanghaiTime(value: unknown) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return "-";
+  return new Date(n).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+}
+
+function billingOrderText(order: any) {
+  const orderNo = String(order?.orderNo || order?.id || "-");
+  return [
+    "MultiTrading 新付款订单",
+    "",
+    `订单号：${orderNo}`,
+    `订单ID：${order?.id || "-"}`,
+    `客户邮箱：${order?.email || "-"}`,
+    `owner_id：${order?.ownerId || "-"}`,
+    `套餐：${String(order?.plan || "-").toUpperCase()} / ${billingCycleLabel(order?.billingCycle)}`,
+    `金额：${orderMoneyLabel(order)}`,
+    `支付方式：${paymentMethodLabel(order?.paymentMethod)} · ${paymentProviderLabel(order?.paymentProvider)}`,
+    `状态：${order?.status || "pending"}`,
+    `创建时间：${formatShanghaiTime(order?.createdAt)}`,
+    order?.customerNote ? `客户备注：${order.customerNote}` : "",
+    "",
+    `飞书确认命令：确认收款 ${orderNo} <流水号或备注>`,
+    `也可使用：确认收款并发证 ${orderNo} <流水号或备注>`,
+    "确认后会复用后台发证流程：标记已收款、签发 License，并按现有邮件配置发送给客户。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function signFeishuWebhook(timestamp: number, secret: string) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const bytes = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}\n${secret}`));
+  let binary = "";
+  for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function sendBillingOrderViaFeishuWebhook(text: string): Promise<FeishuNotifyResult> {
+  const webhookUrl = firstString(
+    process.env.FEISHU_BILLING_WEBHOOK_URL,
+    process.env.MT_FEISHU_BILLING_WEBHOOK_URL,
+    process.env.FEISHU_WEBHOOK_URL,
+    process.env.MT_FEISHU_WEBHOOK_URL
+  );
+  if (!webhookUrl) return { ok: false, skipped: true, channel: "webhook", reason: "missing_feishu_webhook" };
+  const secret = firstString(
+    process.env.FEISHU_BILLING_WEBHOOK_SECRET,
+    process.env.MT_FEISHU_BILLING_WEBHOOK_SECRET,
+    process.env.FEISHU_WEBHOOK_SECRET,
+    process.env.MT_FEISHU_WEBHOOK_SECRET
+  );
+  const timestamp = Math.floor(Date.now() / 1000);
+  const payload: any = {
+    msg_type: "text",
+    content: { text },
+  };
+  if (secret) {
+    payload.timestamp = String(timestamp);
+    payload.sign = await signFeishuWebhook(timestamp, secret);
+  }
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const raw = await response.text();
+  let body: any = raw;
+  try {
+    body = raw ? JSON.parse(raw) : null;
+  } catch {
+    body = raw;
+  }
+  const ok = response.ok && (!body || body.code === 0 || body.StatusCode === 0);
+  return { ok, channel: "webhook", status: response.status, response: body };
+}
+
+async function sendBillingOrderViaFeishuApp(text: string): Promise<FeishuNotifyResult> {
+  const appId = firstString(process.env.FEISHU_BILLING_APP_ID, process.env.FEISHU_APP_ID);
+  const appSecret = firstString(process.env.FEISHU_BILLING_APP_SECRET, process.env.FEISHU_APP_SECRET);
+  const chatId = firstString(
+    process.env.FEISHU_BILLING_CHAT_ID,
+    process.env.MT_FEISHU_BILLING_CHAT_ID,
+    process.env.FEISHU_SCHEDULED_CHAT_ID
+  );
+  if (!appId || !appSecret || !chatId) {
+    return { ok: false, skipped: true, channel: "app", reason: "missing_feishu_app_config" };
+  }
+  const tokenResponse = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+  });
+  const tokenBody = await tokenResponse.json().catch(() => null);
+  const token = String(tokenBody?.tenant_access_token || "").trim();
+  if (!tokenResponse.ok || !token) {
+    return { ok: false, channel: "app", status: tokenResponse.status, response: tokenBody };
+  }
+  const response = await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      receive_id: chatId,
+      msg_type: "text",
+      content: JSON.stringify({ text }),
+    }),
+  });
+  const body = await response.json().catch(() => null);
+  const ok = response.ok && body?.code === 0;
+  return { ok, channel: "app", status: response.status, response: body };
+}
+
+async function notifyBillingOrderCreatedFromCloud(order: any): Promise<FeishuNotifyResult> {
+  if (!order) return { ok: false, skipped: true, reason: "missing_order" };
+  const text = billingOrderText(order);
+  try {
+    const webhook = await sendBillingOrderViaFeishuWebhook(text);
+    if (webhook.ok) return webhook;
+    const app = await sendBillingOrderViaFeishuApp(text);
+    return { ...app, fallbackFrom: webhook };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
 }
 
 function unwrapPaymentPayload(body: any) {
@@ -474,20 +646,52 @@ http.route({
     if (plan === "free") return jsonResponse(400, { ok: false, error: "paid_plan_required" });
     const billingCycle = String(body?.billingCycle || body?.billing_cycle || "month").trim().toLowerCase() === "year" ? "year" : "month";
     try {
-    const result = await ctx.runMutation(internal.billing.createManualOrder, {
-      webhookSecret,
-      email: firstString(body?.email, body?.customerEmail, body?.customer_email),
-      ownerId: firstString(body?.ownerId, body?.owner_id),
-      plan,
-      billingCycle,
-      paymentMethod: firstString(body?.paymentMethod, body?.payment_method),
-      paymentProvider: firstPaymentProvider(body?.paymentProvider, body?.payment_provider, body?.provider),
-      customerNote: firstString(body?.customerNote, body?.customer_note, body?.note),
-    });
-      return jsonResponse(200, result);
+      const result = await ctx.runMutation(internal.billing.createManualOrder, {
+        webhookSecret,
+        email: firstString(body?.email, body?.customerEmail, body?.customer_email),
+        ownerId: firstString(body?.ownerId, body?.owner_id),
+        plan,
+        billingCycle,
+        paymentMethod: firstString(body?.paymentMethod, body?.payment_method),
+        paymentProvider: firstPaymentProvider(body?.paymentProvider, body?.payment_provider, body?.provider),
+        customerNote: firstString(body?.customerNote, body?.customer_note, body?.note),
+      });
+      const feishuNotification = await notifyBillingOrderCreatedFromCloud((result as any)?.order);
+      return jsonResponse(200, { ...(result as any), feishuNotification });
     } catch (err: any) {
       const message = String(err?.message || err);
       return jsonResponse(message === "unauthorized" ? 401 : 400, { ok: false, error: message });
+    }
+  }),
+});
+
+http.route({
+  path: "/billing/public/manual-orders",
+  method: "POST",
+  handler: httpActionGeneric(async (ctx, request) => {
+    let body: any;
+    try {
+      body = await request.json();
+    } catch {
+      return jsonResponse(400, { ok: false, error: "invalid_json" });
+    }
+    const plan = normalizePlan(body?.plan);
+    if (plan === "free") return jsonResponse(400, { ok: false, error: "paid_plan_required" });
+    const billingCycle = String(body?.billingCycle || body?.billing_cycle || "month").trim().toLowerCase() === "year" ? "year" : "month";
+    try {
+      const result = await ctx.runMutation((internal.billing as any).publicCreateManualOrder, {
+        email: firstString(body?.email, body?.customerEmail, body?.customer_email),
+        ownerId: firstString(body?.ownerId, body?.owner_id),
+        plan,
+        billingCycle,
+        paymentMethod: firstString(body?.paymentMethod, body?.payment_method),
+        paymentProvider: firstPaymentProvider(body?.paymentProvider, body?.payment_provider, body?.provider),
+        customerNote: firstString(body?.customerNote, body?.customer_note, body?.note),
+      });
+      const feishuNotification = await notifyBillingOrderCreatedFromCloud((result as any)?.order);
+      return jsonResponse(200, { ...(result as any), feishuNotification });
+    } catch (err: any) {
+      return jsonResponse(400, { ok: false, error: String(err?.message || err) });
     }
   }),
 });

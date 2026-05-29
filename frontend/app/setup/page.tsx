@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 import { PageShell } from "@/components/ui/page-shell";
 import { SetupApiKeysPanel } from "@/components/setup-api-keys-panel";
 import { EntitlementNotice } from "@/components/entitlement-guard";
 import { useEntitlements } from "@/lib/use-entitlements";
+
+const IS_CUSTOMER_BUILD = process.env.NEXT_PUBLIC_MT_BUILD_TARGET === "customer";
 
 type SetupStatus = {
   configured: {
@@ -172,6 +175,7 @@ const externalCredentialLinks = {
   polygon: "https://polygon.io/dashboard/signup",
   twelveData: "https://twelvedata.com/register",
   fred: "https://fred.stlouisfed.org/docs/api/api_key.html",
+  fmp: "https://site.financialmodelingprep.com/developer/docs",
   coingecko: "https://www.coingecko.com/en/developers/dashboard",
 } as const;
 
@@ -228,6 +232,29 @@ function SecretInputWithLink({
       {input}
     </div>
   );
+}
+
+function openbbReasonText(reason: unknown): string {
+  const value = String(reason || "").trim();
+  const messages: Record<string, string> = {
+    empty_or_fmp_key_missing: "未配置 FMP Key",
+    fmp_payment_required: "FMP 套餐不支持该端点",
+    fmp_endpoint_not_found: "FMP/OpenBB 端点不可用",
+    fmp_key_unauthorized: "FMP Key 无效",
+    fmp_forbidden: "FMP Key 无权访问",
+    empty_fmp_response: "FMP 返回空数据",
+    empty_openbb_fmp_response: "OpenBB FMP 返回空数据",
+    openbb_disabled_or_unconfigured: "OpenBB 未启用或未配置",
+    openbb_auto_start_disabled: "OpenBB 自动启动关闭",
+    openbb_port_occupied: "OpenBB 端口已被占用",
+    openbb_command_not_found: "找不到 OpenBB API 命令",
+    openbb_unreachable: "OpenBB 无法连接",
+  };
+  return messages[value] || value || "-";
+}
+
+function openbbOkText(ok: unknown): string {
+  return ok ? "OK" : "不可用";
 }
 
 const setupToneDotClass = (tone: SetupSectionTone) =>
@@ -375,11 +402,12 @@ export default function SetupPage() {
   const [diag, setDiag] = useState<LongPortDiag | null>(null);
   const [saving, setSaving] = useState(false);
   const [testingOpenbb, setTestingOpenbb] = useState(false);
+  const [restartingOpenbb, setRestartingOpenbb] = useState(false);
+  const [openbbDiagnostics, setOpenbbDiagnostics] = useState<any>(null);
   const [installingCnProvider, setInstallingCnProvider] = useState("");
   const [cnInstallRestartHint, setCnInstallRestartHint] = useState<Record<string, boolean>>({});
   const [taAdvancedMode, setTaAdvancedMode] = useState(false);
   const [activeSection, setActiveSection] = useState<SetupSectionKey>("accounts");
-  const [starting, setStarting] = useState(false);
   const [stoppingAll, setStoppingAll] = useState(false);
   const [savingFees, setSavingFees] = useState(false);
   const [msg, setMsg] = useState("");
@@ -454,6 +482,7 @@ export default function SetupPage() {
     polygon_api_key: "",
     twelve_data_api_key: "",
     fred_api_key: "",
+    fmp_api_key: "",
     coingecko_api_key: "",
     openclaw_mcp_max_level: "",
     openclaw_mcp_allow_l3: "",
@@ -709,6 +738,7 @@ export default function SetupPage() {
         polygon_api_key: "",
         twelve_data_api_key: "",
         fred_api_key: "",
+        fmp_api_key: "",
         coingecko_api_key: "",
         openclaw_mcp_max_level: "",
         openclaw_mcp_allow_l3: "",
@@ -761,7 +791,12 @@ export default function SetupPage() {
       } else if (!enabled) {
         setMsg("OpenBB 当前未启用，请先保存 OPENBB_ENABLED=true。");
       } else {
-        setMsg(`OpenBB 已启用但连接失败（${base}），请确认服务是否启动。`);
+        const reason = String(r?.health?.autostart?.reason || r?.health?.reason || "service_unreachable");
+        const hint =
+          reason === "openbb_command_not_found"
+            ? "客户版未预置 OpenBB API 服务；请单独启动 OpenBB API，或由管理员重新打包含 OpenBB 运行环境。"
+            : "请确认 OpenBB API 服务是否启动，并检查 OPENBB_BASE_URL。";
+        setMsg(`OpenBB 已启用但连接失败（${base}，原因：${reason}）。${hint}`);
       }
       setErr("");
     } catch (e: any) {
@@ -771,7 +806,60 @@ export default function SetupPage() {
     }
   };
 
+  const refreshOpenbbDiagnostics = async () => {
+    const r = await apiGet<any>("/research/external/openbb/diagnostics", { cacheTtlMs: 0, retries: 0, timeoutMs: 90000 });
+    const diag = r?.diagnostics || null;
+    setOpenbbDiagnostics(diag);
+    return diag;
+  };
+
+  const testOpenbbDiagnostics = async () => {
+    setTestingOpenbb(true);
+    try {
+      const diag = await refreshOpenbbDiagnostics();
+      const health = diag?.health || {};
+      const enabled = Boolean(diag?.enabled ?? health?.enabled);
+      const ok = Boolean(health?.ok);
+      const base = diag?.base_url || health?.base_url || status?.values?.openbb_base_url || "未配置";
+      if (enabled && ok) {
+        setMsg(`OpenBB 连接正常：${base}`);
+      } else if (!enabled) {
+        setMsg("OpenBB 当前未启用，请先保存 OPENBB_ENABLED=true。");
+      } else {
+        const reason = String(health?.autostart?.reason || health?.reason || "service_unreachable");
+        setMsg(`OpenBB 已启用但连接失败：${base}，原因：${openbbReasonText(reason)}。`);
+      }
+      setErr("");
+    } catch (e: any) {
+      setErr(String(e.message || e));
+    } finally {
+      setTestingOpenbb(false);
+    }
+  };
+
+  const restartOpenbb = async () => {
+    setRestartingOpenbb(true);
+    try {
+      const r = await apiPost<any>("/research/external/openbb/restart", { clear_cache: true }, { cacheTtlMs: 0, retries: 0, timeoutMs: 120000 });
+      await refreshOpenbbDiagnostics();
+      if (r?.restart?.ok) {
+        setMsg("OpenBB 已重启，并已清理 OpenBB research cache。");
+      } else {
+        setMsg(`OpenBB 重启未完成：${openbbReasonText(r?.restart?.reason || "openbb_restart_failed")}`);
+      }
+      setErr("");
+    } catch (e: any) {
+      setErr(String(e.message || e));
+    } finally {
+      setRestartingOpenbb(false);
+    }
+  };
+
   const installCnProvider = async (provider: "mootdx" | "akshare" | "tushare" | "baostock" | "all") => {
+    if (IS_CUSTOMER_BUILD) {
+      setErr("客户版不支持运行时安装 Python 数据源包；请使用安装包内置数据源，或由管理员重新打包含所需数据源。");
+      return;
+    }
     setInstallingCnProvider(provider);
     setErr("");
     try {
@@ -797,7 +885,27 @@ export default function SetupPage() {
   };
 
   const cnProviderById = (id: string) => cnProviderStatus?.providers?.find((p) => p.id === id);
+  const cnProviderStatusLabel = (p?: { installed?: boolean; configured?: boolean; enabled?: boolean; status_text?: string }) => {
+    if (!p) return "检测中";
+    if (!p.installed && !p.configured) return "未预置";
+    if (!p.enabled) return "已停用";
+    return p.status_text || "可用";
+  };
+  const cnProviderStatusHelp = (id: string, p?: { installed?: boolean; configured?: boolean; enabled?: boolean; setup_hint?: string }) => {
+    if (IS_CUSTOMER_BUILD && !p?.installed && !p?.configured) {
+      return `${id} 未随客户安装包预置，客户版不能在线安装 Python 包；请使用 local_cache/Tencent/EastMoney，或让管理员重新打包。`;
+    }
+    const tokenReady = Boolean(status?.values?.tushare_token);
+    if (id === "tushare" && p?.installed && !tokenReady) {
+      return "Tushare Pro 已预置，但需要填写 TUSHARE_TOKEN 后保存。";
+    }
+    if (p?.installed && p?.enabled === false) {
+      return "包已预置，但当前 owner 的启用开关为 false；改为 true 并保存后刷新状态。";
+    }
+    return p?.setup_hint || "读取后端检测结果。";
+  };
   const cnInstallButtonLabel = (id: "mootdx" | "akshare" | "tushare" | "baostock", title: string) => {
+    if (IS_CUSTOMER_BUILD) return "客户版不支持在线安装";
     if (installingCnProvider === id) return "安装中...";
     if (cnInstallRestartHint[id]) return "已安装，建议重启";
     const provider = cnProviderById(id);
@@ -816,22 +924,8 @@ export default function SetupPage() {
     }
   };
 
-  const startServices = async () => {
-    setStarting(true);
-    try {
-      await apiPost("/setup/services/start", { start_feishu_bot: true, enable_auto_trader: true });
-      setMsg("服务启动命令已发送。");
-      await load();
-      setErr("");
-    } catch (e: any) {
-      setErr(String(e.message || e));
-    } finally {
-      setStarting(false);
-    }
-  };
-
   const stopAllServices = async () => {
-    const ok = confirm("确认停止前端和后端服务吗？这会关闭当前页面连接。");
+    const ok = confirm("确认关闭 MultiTrading 系统吗？这会停止前端和后端服务，当前页面连接会断开。");
     if (!ok) return;
     setStoppingAll(true);
     try {
@@ -841,7 +935,7 @@ export default function SetupPage() {
         stop_feishu_bot: true,
         stop_auto_trader: true,
       });
-      setMsg("停止命令已发送，页面可能即将断开。");
+      setMsg("关闭系统命令已发送，页面可能即将断开。");
       setErr("");
       // 不调用 load()，因为后端会自停，避免无意义报错闪烁。
     } catch (e: any) {
@@ -1338,8 +1432,8 @@ export default function SetupPage() {
     risk: {
       tone: riskEnabled && serviceRunning ? "ready" : riskEnabled ? "attention" : "neutral",
       label: riskEnabled ? (serviceRunning ? "运行中" : "风控已开") : "风控关闭",
-      detail: "风控参数与 Feishu Bot / Auto Trader 服务启停。",
-      nextStep: riskEnabled ? "确认最大订单金额和单日损失阈值，再启动服务。" : "建议启用风控后再启动自动交易相关服务。",
+      detail: "风控参数与系统服务状态；飞书在通知中心管理，自动交易在自动交易页面管理。",
+      nextStep: riskEnabled ? "确认最大订单金额和单日损失阈值；如需飞书通知请去通知中心管理。" : "建议先启用风控，再开启自动交易相关模块。",
       metrics: [
         { label: "风控", value: riskEnabled ? "已启用" : "未启用", tone: riskEnabled ? "ready" : "attention" },
         { label: "Feishu Bot", value: services?.feishu_bot_running ? "运行中" : "未运行", tone: services?.feishu_bot_running ? "ready" : "neutral" },
@@ -1373,7 +1467,7 @@ export default function SetupPage() {
         : activeSection === "research"
           ? [
               { label: saving ? "保存中..." : "保存数据源配置", onClick: saveSecrets, disabled: saving, variant: "primary" },
-              { label: testingOpenbb ? "测试中..." : "测试 OpenBB", onClick: testOpenbb, disabled: testingOpenbb },
+              { label: testingOpenbb ? "测试中..." : "测试 OpenBB", onClick: testOpenbbDiagnostics, disabled: testingOpenbb },
             ]
           : activeSection === "agents"
             ? [
@@ -1387,8 +1481,7 @@ export default function SetupPage() {
               : activeSection === "risk"
                 ? [
                     { label: "保存风控参数", onClick: saveRisk, disabled: !risk, variant: "primary" },
-                    { label: starting ? "启动中..." : "启动服务", onClick: startServices, disabled: starting },
-                    { label: stoppingAll ? "停止中..." : "停止全部", onClick: stopAllServices, disabled: stoppingAll },
+                    { label: stoppingAll ? "关闭中..." : "关闭系统", onClick: stopAllServices, disabled: stoppingAll },
                   ]
                 : [
                     { label: saving ? "保存中..." : "保存高级设置", onClick: saveSecrets, disabled: saving, variant: "primary" },
@@ -2106,6 +2199,11 @@ export default function SetupPage() {
             input={<input className="input-base" type="password" placeholder={`FRED_API_KEY (当前: ${status?.values.fred_api_key || "未配置"})`} value={form.fred_api_key} onChange={(e) => setForm((s) => ({ ...s, fred_api_key: e.target.value }))} />}
           />
           <SecretInputWithLink
+            label="申请 FMP API Key"
+            href={externalCredentialLinks.fmp}
+            input={<input className="input-base" type="password" placeholder={`FMP_API_KEY (当前: ${status?.values.fmp_api_key || "未配置"})`} value={form.fmp_api_key} onChange={(e) => setForm((s) => ({ ...s, fmp_api_key: e.target.value }))} />}
+          />
+          <SecretInputWithLink
             label="申请 CoinGecko API Key"
             href={externalCredentialLinks.coingecko}
             input={<input className="input-base" type="password" placeholder={`COINGECKO_API_KEY (当前: ${status?.values.coingecko_api_key || "未配置"})`} value={form.coingecko_api_key} onChange={(e) => setForm((s) => ({ ...s, coingecko_api_key: e.target.value }))} />}
@@ -2206,9 +2304,63 @@ export default function SetupPage() {
         <div className="text-xs text-slate-400">
           建议先启动 OpenBB API（默认 http://127.0.0.1:6900），再点击“测试 OpenBB 连接”。
         </div>
-        <button className="btn-secondary" onClick={testOpenbb} disabled={testingOpenbb}>
-          {testingOpenbb ? "测试中..." : "测试 OpenBB 连接"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button className="btn-secondary" onClick={testOpenbbDiagnostics} disabled={testingOpenbb || restartingOpenbb}>
+            {testingOpenbb ? "诊断中..." : "诊断 OpenBB"}
+          </button>
+          <button className="btn-secondary" onClick={restartOpenbb} disabled={testingOpenbb || restartingOpenbb}>
+            {restartingOpenbb ? "重启中..." : "重启 OpenBB 并清缓存"}
+          </button>
+        </div>
+        {openbbDiagnostics ? (
+          <div className="rounded-lg border border-slate-700/70 bg-slate-950/40 p-3 text-xs text-slate-300">
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+              <div>
+                <div className="text-slate-500">API</div>
+                <div className={openbbDiagnostics?.health?.ok ? "text-emerald-300" : "text-rose-300"}>{openbbOkText(openbbDiagnostics?.health?.ok)}</div>
+                <div className="truncate text-slate-400">{openbbDiagnostics?.base_url || "-"}</div>
+              </div>
+              <div>
+                <div className="text-slate-500">Process</div>
+                <div>{openbbDiagnostics?.process?.port_open ? "port open" : "port closed"}</div>
+                <div className="text-slate-400">PID: {(openbbDiagnostics?.process?.listener_pids || []).join(", ") || "-"}</div>
+              </div>
+              <div>
+                <div className="text-slate-500">Cache</div>
+                <div>{openbbDiagnostics?.cache?.enabled ? "enabled" : "disabled"}</div>
+                <div className="text-slate-400">entries: {openbbDiagnostics?.cache?.entries ?? 0}</div>
+              </div>
+              <div>
+                <div className="text-slate-500">Keys</div>
+                <div>FMP: {openbbDiagnostics?.capabilities?.credentials?.fmp?.configured ? "configured" : "-"}</div>
+                <div>FRED: {openbbDiagnostics?.capabilities?.credentials?.fred?.configured ? "configured" : "-"}</div>
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
+              {[
+                ["FMP profile", openbbDiagnostics?.capabilities?.fmp_profile],
+                ["FMP ETF holdings", openbbDiagnostics?.capabilities?.fmp_etf_holdings],
+                ["FMP ETF sectors", openbbDiagnostics?.capabilities?.fmp_etf_sectors],
+                ["SEC", openbbDiagnostics?.capabilities?.sec],
+                ["FRED", openbbDiagnostics?.capabilities?.fred],
+                ["CFTC", openbbDiagnostics?.capabilities?.cftc],
+              ].map(([label, item]: any) => (
+                <div key={label} className="rounded border border-slate-800/80 px-2 py-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>{label}</span>
+                    <span className={item?.ok ? "text-emerald-300" : "text-amber-300"}>{openbbOkText(item?.ok)}</span>
+                  </div>
+                  <div className="truncate text-slate-500">
+                    {openbbReasonText(item?.reason)}
+                    {typeof item?.count === "number" ? ` / count ${item.count}` : ""}
+                    {typeof item?.filings_count === "number" ? ` / filings ${item.filings_count}` : ""}
+                    {typeof item?.available_count === "number" ? ` / available ${item.available_count}` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="panel space-y-3">
@@ -2218,6 +2370,7 @@ export default function SetupPage() {
             type="button"
             className="btn-secondary"
             disabled={
+              IS_CUSTOMER_BUILD ||
               Boolean(installingCnProvider) ||
               (Boolean(cnProviderById("mootdx")?.installed) &&
                 Boolean(cnProviderById("akshare")?.installed) &&
@@ -2247,11 +2400,11 @@ export default function SetupPage() {
                         : "bg-amber-500/10 text-amber-200")
                     }
                   >
-                    {cnInstallRestartHint[id] ? "已安装，建议重启" : p?.status_text || "检测中"}
+                    {cnInstallRestartHint[id] ? "已安装，建议重启" : cnProviderStatusLabel(p)}
                   </span>
                 </div>
                 <div className="mt-1 text-[11px] leading-relaxed text-slate-500">
-                  {cnInstallRestartHint[id] ? "安装已完成；重启后端后状态会从运行环境重新检测。" : p?.setup_hint || "正在读取后端检测结果。"}
+                  {cnInstallRestartHint[id] ? "安装已完成；重启后端后状态会从运行环境重新检测。" : cnProviderStatusHelp(id, p)}
                 </div>
               </div>
             );
@@ -2270,7 +2423,7 @@ export default function SetupPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={Boolean(installingCnProvider) || Boolean(cnProviderById("mootdx")?.installed)}
+            disabled={IS_CUSTOMER_BUILD || Boolean(installingCnProvider) || Boolean(cnProviderById("mootdx")?.installed)}
             onClick={() => void installCnProvider("mootdx")}
           >
             {cnInstallButtonLabel("mootdx", "mootdx")}
@@ -2299,7 +2452,7 @@ export default function SetupPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={Boolean(installingCnProvider) || Boolean(cnProviderById("akshare")?.installed)}
+            disabled={IS_CUSTOMER_BUILD || Boolean(installingCnProvider) || Boolean(cnProviderById("akshare")?.installed)}
             onClick={() => void installCnProvider("akshare")}
           >
             {cnInstallButtonLabel("akshare", "AkShare")}
@@ -2316,7 +2469,7 @@ export default function SetupPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={Boolean(installingCnProvider) || Boolean(cnProviderById("tushare")?.installed)}
+            disabled={IS_CUSTOMER_BUILD || Boolean(installingCnProvider) || Boolean(cnProviderById("tushare")?.installed)}
             onClick={() => void installCnProvider("tushare")}
           >
             {cnInstallButtonLabel("tushare", "Tushare")}
@@ -2333,7 +2486,7 @@ export default function SetupPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={Boolean(installingCnProvider) || Boolean(cnProviderById("baostock")?.installed)}
+            disabled={IS_CUSTOMER_BUILD || Boolean(installingCnProvider) || Boolean(cnProviderById("baostock")?.installed)}
             onClick={() => void installCnProvider("baostock")}
           >
             {cnInstallButtonLabel("baostock", "BaoStock")}
@@ -2931,40 +3084,106 @@ export default function SetupPage() {
 
       {activeSection === "risk" ? (
         <>
-      <div className="panel space-y-3">
-        <div className="field-label">风控参数</div>
-        {risk ? (
-          <>
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-              <input className="input-base" type="number" value={risk.max_order_amount} onChange={(e) => setRisk({ ...risk, max_order_amount: Number(e.target.value) })} />
-              <input className="input-base" type="number" step="0.01" value={risk.max_daily_loss_pct} onChange={(e) => setRisk({ ...risk, max_daily_loss_pct: Number(e.target.value) })} />
-              <input className="input-base" type="number" step="0.01" value={risk.stop_loss_pct} onChange={(e) => setRisk({ ...risk, stop_loss_pct: Number(e.target.value) })} />
-              <input className="input-base" type="number" step="0.01" value={risk.max_position_pct} onChange={(e) => setRisk({ ...risk, max_position_pct: Number(e.target.value) })} />
-              <select className="input-base" value={risk.enabled ? "1" : "0"} onChange={(e) => setRisk({ ...risk, enabled: e.target.value === "1" })}>
-                <option value="1">风控启用</option>
-                <option value="0">风控关闭</option>
-              </select>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
+        <div className="panel space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="field-label">风控规则</div>
+              <p className="mt-1 text-sm text-slate-400">保存后作为自动交易的安全边界；保存参数不会启动飞书或自动交易。</p>
             </div>
-            <button className="btn-secondary" onClick={saveRisk}>保存风控参数</button>
-          </>
-        ) : (
-          <div className="text-sm text-slate-400">加载中...</div>
-        )}
-      </div>
-
-      <div className="panel space-y-2">
-        <div className="field-label">服务启动</div>
-        <div className="text-sm text-slate-300">
-          Feishu Bot：{services?.feishu_bot_running ? <span className="text-emerald-300">运行中</span> : <span className="text-slate-300">未运行</span>}
-          {" | "}
-          Auto Trader：{services?.auto_trader_scheduler_running ? <span className="text-emerald-300">运行中</span> : <span className="text-slate-300">未运行</span>}
+            <span className={`rounded-full border px-3 py-1 text-sm font-semibold ${
+              risk?.enabled
+                ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-200"
+                : "border-amber-400/40 bg-amber-500/10 text-amber-200"
+            }`}>
+              {risk?.enabled ? "风控已启用" : "风控关闭"}
+            </span>
+          </div>
+          {risk ? (
+            <>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">单笔最大金额</span>
+                  <input className="input-base" type="number" value={risk.max_order_amount} onChange={(e) => setRisk({ ...risk, max_order_amount: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">超过该金额的订单会被拦截。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">单日最大亏损比例</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_daily_loss_pct} onChange={(e) => setRisk({ ...risk, max_daily_loss_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">例如 0.2 表示 20%。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">单笔止损比例</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.stop_loss_pct} onChange={(e) => setRisk({ ...risk, stop_loss_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">用于自动交易的基础止损边界。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">单仓最大占比</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_position_pct} onChange={(e) => setRisk({ ...risk, max_position_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">限制单个持仓占账户的比例。</span>
+                </label>
+                <label className="space-y-1 md:col-span-2 xl:col-span-1">
+                  <span className="text-xs font-medium text-slate-400">风控总开关</span>
+                  <select className="input-base" value={risk.enabled ? "1" : "0"} onChange={(e) => setRisk({ ...risk, enabled: e.target.value === "1" })}>
+                    <option value="1">启用风控</option>
+                    <option value="0">关闭风控</option>
+                  </select>
+                  <span className="block text-[11px] text-slate-500">建议先启用风控，再到自动交易页面启动具体 worker。</span>
+                </label>
+              </div>
+              <div className={`rounded-xl border px-4 py-3 text-sm ${
+                risk.enabled
+                  ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-100"
+                  : "border-amber-500/25 bg-amber-500/10 text-amber-100"
+              }`}>
+                {risk.enabled
+                  ? "当前风控会参与自动交易下单前检查。"
+                  : "当前风控未启用：自动交易仍可单独运行，但缺少总闸保护。"}
+              </div>
+              <button className="btn-secondary" onClick={saveRisk}>保存风控参数</button>
+            </>
+          ) : (
+            <div className="text-sm text-slate-400">加载中...</div>
+          )}
         </div>
-        <button className="btn-primary" onClick={startServices} disabled={starting}>
-          {starting ? "启动中..." : "一键启动服务"}
-        </button>
-        <button className="btn-secondary" onClick={stopAllServices} disabled={stoppingAll}>
-          {stoppingAll ? "停止中..." : "停止前后端服务"}
-        </button>
+
+        <div className="panel space-y-4">
+          <div>
+            <div className="field-label">服务状态与系统关闭</div>
+            <p className="mt-1 text-sm text-slate-400">这里只显示服务状态和关闭系统入口；飞书与自动交易分别在各自页面管理。</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+            <div className="rounded-xl border border-slate-700/70 bg-slate-950/40 p-4">
+              <div className="text-sm text-slate-400">Feishu Bot</div>
+              <div className={`mt-1 text-xl font-semibold ${services?.feishu_bot_running ? "text-emerald-300" : "text-slate-200"}`}>
+                {services?.feishu_bot_running ? "运行中" : "未运行"}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">用于飞书通知、指令和收款确认。</div>
+              <Link className="mt-3 inline-flex text-sm font-semibold text-cyan-200 hover:text-cyan-100" href="/notifications">
+                去通知中心管理飞书
+              </Link>
+            </div>
+            <div className="rounded-xl border border-slate-700/70 bg-slate-950/40 p-4">
+              <div className="text-sm text-slate-400">Auto Trader</div>
+              <div className={`mt-1 text-xl font-semibold ${services?.auto_trader_scheduler_running ? "text-emerald-300" : "text-slate-200"}`}>
+                {services?.auto_trader_scheduler_running ? "运行中" : "未运行"}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">用于自动扫描、生成信号和执行交易流程。</div>
+              <Link className="mt-3 inline-flex text-sm font-semibold text-cyan-200 hover:text-cyan-100" href="/auto-trader">
+                去自动交易页面管理
+              </Link>
+            </div>
+          </div>
+          <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
+            推荐顺序：先保存并启用风控，再到通知中心启动飞书，到自动交易页面启动具体交易模块。
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button className="btn-secondary border-rose-500/40 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20" onClick={stopAllServices} disabled={stoppingAll}>
+              {stoppingAll ? "关闭中..." : "关闭系统"}
+            </button>
+          </div>
+          <p className="text-xs text-rose-200/80">关闭系统会停止前端和后端服务，当前页面会断开；不会删除任何已保存配置。</p>
+        </div>
       </div>
         </>
       ) : null}

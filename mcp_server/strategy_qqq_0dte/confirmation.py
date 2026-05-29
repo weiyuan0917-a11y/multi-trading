@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from typing import Literal, Sequence
 
-from backtest_engine import Bar
+try:
+    from mcp_server.backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
 from .config import Qqq0dteConfig
 from .zones import ReactionZone

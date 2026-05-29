@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Sequence
 
-from backtest_engine import Bar
+try:
+    from mcp_server.backtest_engine import Bar
+except ImportError:
+    from backtest_engine import Bar
 
 from .config import Qqq0dteConfig
 from .session_us import rth_bounds, to_ny

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -37,7 +38,7 @@ class AgentStrategyLabError(ValueError):
 
 
 def default_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[2]).resolve()
 
 
 def _ensure_repo_import_paths(root: Path | None = None) -> None:

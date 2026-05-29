@@ -19,6 +19,7 @@ class SetupConfigBody(BaseModel):
     polygon_api_key: Optional[str] = None
     twelve_data_api_key: Optional[str] = None
     fred_api_key: Optional[str] = None
+    fmp_api_key: Optional[str] = None
     coingecko_api_key: Optional[str] = None
     openclaw_mcp_max_level: Optional[str] = None
     openclaw_mcp_allow_l3: Optional[str] = None
