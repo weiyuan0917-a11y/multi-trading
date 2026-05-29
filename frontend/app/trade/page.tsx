@@ -112,6 +112,7 @@ export default function TradePage() {
     quantity: 100,
     price: "",
   });
+  const [confirmationToken, setConfirmationToken] = useState("");
   useLayoutEffect(() => {
     setForm((s) => ({ ...s, symbol: readLastSymbol() }));
   }, []);
@@ -180,14 +181,24 @@ export default function TradePage() {
     if (!confirm(msg)) return;
 
     try {
+      let token = confirmationToken.trim();
+      if (!token) {
+        token = String(window.prompt("请输入 L3 confirmation_token（与 Setup 中配置的一致）", "") || "").trim();
+      }
+      if (!token) {
+        setError("confirmation_token 无效或缺失：请在下单区域填写 L3 confirmation_token 后再提交。");
+        return;
+      }
       const payload: any = {
         action: form.action,
         symbol: form.symbol,
         quantity: Number(form.quantity),
+        confirmation_token: token,
       };
       if (effectiveAccountId) payload.account_id = effectiveAccountId;
       if (form.price) payload.price = Number(form.price);
       await apiPost("/trade/order", payload);
+      setError("");
       writeLastSymbol(form.symbol);
       await Promise.all([mutateAccount(), mutatePositions(), mutateOrders(), mutateRisk()]);
     } catch (e: any) {
@@ -287,7 +298,7 @@ export default function TradePage() {
 
       <div className="panel">
         <div className="field-label">{"\u4e0b\u5355\uff08\u63d0\u4ea4\u524d\u4e8c\u6b21\u786e\u8ba4\uff09"}</div>
-        <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-5">
+        <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-6">
           <select
             className="input-base"
             value={form.action}
@@ -317,6 +328,15 @@ export default function TradePage() {
             value={form.price}
             onChange={(e) => setForm((s) => ({ ...s, price: e.target.value }))}
             placeholder={"\u7559\u7a7a = \u5e02\u4ef7"}
+          />
+
+          <input
+            className="input-base"
+            type="password"
+            value={confirmationToken}
+            onChange={(e) => setConfirmationToken(e.target.value)}
+            placeholder="confirmation_token"
+            autoComplete="one-time-code"
           />
 
           <button className="btn-primary" onClick={submitOrder} disabled={!canTradeStocks}>
