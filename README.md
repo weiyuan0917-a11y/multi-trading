@@ -10,6 +10,10 @@
   <a href="./DISCLAIMER.md"><img alt="Not financial advice" src="https://img.shields.io/badge/Trading-risk%20warning-orange.svg" /></a>
 </p>
 
+<p align="center">
+  <strong><a href="https://github.com/weiyuan0917-a11y/multi-trading/releases/tag/v1.0.16">下载 Windows 安装包：MultiTradingSetup-1.0.16.exe</a></strong>
+</p>
+
 基于 `Broker OpenAPI (LongPort-compatible provider)` + `MCP` + `FastAPI` + `Next.js` 的交易与策略平台。  
 它支持两种使用方式：
 
@@ -886,6 +890,8 @@ Multi-Trading 与上述项目、品牌或公司没有官方从属、背书或授
 
 ## 15. 参考链接
 
+- [V1.0.16 Windows 安装包下载](https://github.com/weiyuan0917-a11y/multi-trading/releases/tag/v1.0.16)
+- [全部发布版本](https://github.com/weiyuan0917-a11y/multi-trading/releases)
 - [LongPort OpenAPI (LongPort-compatible provider)](https://open.longportapp.com/)
 - [Model Context Protocol](https://github.com/modelcontextprotocol)
 
