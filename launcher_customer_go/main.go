@@ -31,8 +31,10 @@ func main() {
 	node := filepath.Join(root, "runtime", "node", "node.exe")
 	frontendDir := filepath.Join(root, "frontend")
 	server := filepath.Join(frontendDir, "server.js")
-	backendLog := filepath.Join(root, "launcher_backend.log")
-	frontendLog := filepath.Join(root, "launcher_frontend.log")
+	runtimeDir := customerRuntimeDir()
+	logDir := filepath.Join(runtimeDir, "logs")
+	backendLog := filepath.Join(logDir, "launcher_backend.log")
+	frontendLog := filepath.Join(logDir, "launcher_frontend.log")
 
 	var missing []string
 	for _, p := range []string{backend, node, server} {
@@ -80,11 +82,27 @@ func customerEnv(root string) []string {
 	env = setEnv(env, "MT_BUILD_TARGET", "customer")
 	env = setEnv(env, "NEXT_PUBLIC_MT_BUILD_TARGET", "customer")
 	env = setEnv(env, "MULTITRADING_ROOT", root)
+	env = setEnv(env, "MULTITRADING_RUNTIME_DIR", customerRuntimeDir())
+	env = setEnv(env, "MULTITRADING_LOG_DIR", filepath.Join(customerRuntimeDir(), "logs"))
 	env = setEnv(env, "LONGPORT_API_PORT", apiPort)
 	env = setEnv(env, "LONGPORT_WEB_PORT", webPort)
 	env = setEnv(env, "LOCAL_AGENT_ALLOW_USER_OWNERS", "true")
 	env = setEnv(env, "NEXT_TELEMETRY_DISABLED", "1")
 	return env
+}
+
+func customerRuntimeDir() string {
+	base := os.Getenv("LOCALAPPDATA")
+	if strings.TrimSpace(base) == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			base = home
+		} else {
+			base = os.TempDir()
+		}
+	}
+	dir := filepath.Join(base, "MultiTrading")
+	_ = os.MkdirAll(filepath.Join(dir, "logs"), 0755)
+	return dir
 }
 
 func appendDotEnv(env []string, path string) []string {
