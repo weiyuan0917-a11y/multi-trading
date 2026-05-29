@@ -3173,6 +3173,27 @@ def _read_server_kline_cache_file(path: str) -> tuple[list[Bar] | None, dict[str
     return (bars if bars else None), meta
 
 
+def _server_kline_cache_candidate_paths(symbol: str, kline: BacktestKline | str, periods: int, days: int) -> list[str]:
+    exact = _kline_server_cache_path(symbol, kline, periods, days)
+    base = os.path.abspath(KLINE_SERVER_CACHE_DIR)
+    try:
+        stem = _safe_kline_cache_stem(symbol)
+    except Exception:
+        return [exact]
+    kl = str(kline or "1d").strip().lower()
+    out: list[str] = [exact]
+    try:
+        for name in sorted(os.listdir(base)):
+            if not name.startswith(f"{stem}__{kl}__") or not name.endswith(".json"):
+                continue
+            path = os.path.normpath(os.path.join(base, name))
+            if path not in out:
+                out.append(path)
+    except Exception:
+        pass
+    return out
+
+
 def _bar_calendar_date(b: Bar) -> date:
     """Bar 时间戳对应的日历日（用于按自然日窗口过滤）。"""
     dt = b.date
@@ -3221,6 +3242,43 @@ def _bars_cover_calendar_start(bars: list[Bar], start: date, slack_days: int = 5
     return m <= start + timedelta(days=slack_days)
 
 
+def _bars_date_bounds(bars: list[Bar]) -> tuple[date | None, date | None]:
+    if not bars:
+        return None, None
+    dates = [_bar_calendar_date(b) for b in bars]
+    return min(dates), max(dates)
+
+
+def _trim_calendar_bars_to_days(bars: list[Bar], days: int, *, ref_end: date | None = None) -> list[Bar]:
+    if not bars:
+        return []
+    requested_days = max(1, int(days))
+    _first, last = _bars_date_bounds(bars)
+    end = ref_end or last or date.today()
+    start = end - timedelta(days=requested_days)
+    out = [b for b in bars if start <= _bar_calendar_date(b) <= end]
+    out.sort(key=lambda x: x.date)
+    return out
+
+
+def _calendar_cache_reference_end(loaded: list[tuple[str, list[Bar]]]) -> date:
+    all_ends: list[date] = []
+    for _path, bars in loaded:
+        _first, last = _bars_date_bounds(bars)
+        if last is not None:
+            all_ends.append(last)
+    return max(all_ends) if all_ends else date.today()
+
+
+def _calendar_cache_day_from_path(path: str) -> int:
+    m = re.search(r"__d(\d+)\.json$", os.path.basename(str(path)))
+    return int(m.group(1)) if m else 0
+
+
+def _calendar_cache_same_end(a: date | None, b: date | None, slack_days: int = 5) -> bool:
+    return a is not None and b is not None and abs((a - b).days) <= slack_days
+
+
 _USE_SERVER_CACHE_FOR_CALENDAR_FETCH = str(os.getenv("LONGPORT_USE_SERVER_KLINE_CACHE", "1")).strip().lower() in {
     "1",
     "true",
@@ -3236,6 +3294,8 @@ def _fetch_bars_calendar_days(
     *,
     _skip_gateway: bool = False,
     owner_id: str | None = None,
+    use_server_kline_cache: bool | None = None,
+    bypass_mem_cache: bool = False,
 ) -> list[Bar]:
     """按日历天数拉取 K 线：可选先走 LONGPORT 网关（与单次 _fetch_bars 一致），再读服务器缓存，否则分页 SDK 拉取。
 
@@ -3251,10 +3311,13 @@ def _fetch_bars_calendar_days(
     if _is_symbol_marked_invalid(sym):
         return _fetch_public_market_bars(sym, int(days), kline)
     ds = max(1, min(_MAX_CALENDAR_DAYS_SINGLE_FETCH, int(days)))
-    cache_key = _longport_bars_mem_cache_key("calendar", sym, ds, str(kline))
-    cached = _longport_bars_mem_cache_get(cache_key)
-    if cached is not None:
-        return cached
+    allow_server_cache = _USE_SERVER_CACHE_FOR_CALENDAR_FETCH if use_server_kline_cache is None else bool(use_server_kline_cache)
+    cache_kind = "calendar_fresh" if (bypass_mem_cache or not allow_server_cache) else "calendar"
+    cache_key = _longport_bars_mem_cache_key(cache_kind, sym, ds, str(kline))
+    if not bypass_mem_cache:
+        cached = _longport_bars_mem_cache_get(cache_key)
+        if cached is not None:
+            return cached
     inflight_ev, inflight_owner = _longport_bars_inflight_enter(cache_key)
     if not inflight_owner:
         bars, err = _longport_bars_inflight_await(cache_key, inflight_ev, timeout_seconds=25.0)
@@ -3288,23 +3351,21 @@ def _fetch_bars_calendar_days(
                                 _longport_bars_inflight_resolve(cache_key, bars=use_gw)
                             return use_gw
 
-        if _USE_SERVER_CACHE_FOR_CALENDAR_FETCH:
+        if allow_server_cache:
             try:
-                path = _kline_server_cache_path(sym, kline, 0, ds)
-                cached, _meta = _read_server_kline_cache_file(path)
+                cached = _load_bars_from_server_kline_cache(sym, kline, 0, ds)
                 if cached:
-                    filtered = _filter_bars_calendar_window(cached, start)
-                    if filtered and _bars_cover_calendar_start(filtered, start):
-                        logger.info(
-                            "kline calendar: server cache hit %s bars=%s window>=%s",
-                            os.path.basename(path),
-                            len(filtered),
-                            start,
-                        )
-                        _longport_bars_mem_cache_put(cache_key, filtered)
-                        if inflight_owner:
-                            _longport_bars_inflight_resolve(cache_key, bars=filtered)
-                        return filtered
+                    logger.info(
+                        "kline calendar: server cache hit %s %s days=%s bars=%s",
+                        sym,
+                        kline,
+                        ds,
+                        len(cached),
+                    )
+                    _longport_bars_mem_cache_put(cache_key, cached)
+                    if inflight_owner:
+                        _longport_bars_inflight_resolve(cache_key, bars=cached)
+                    return cached
             except Exception as e:
                 logger.debug("server kline cache read skipped: %s", e)
 
@@ -3419,18 +3480,23 @@ def _load_bars_from_server_kline_cache(
     periods: int,
     days: int,
 ) -> list[Bar]:
-    path = _kline_server_cache_path(symbol, kline, periods, days)
-    bars, _meta = _read_server_kline_cache_file(path)
-    if not bars:
+    paths = _server_kline_cache_candidate_paths(symbol, kline, periods, days)
+    loaded: list[tuple[str, list[Bar]]] = []
+    for path in paths:
+        bars, _meta = _read_server_kline_cache_file(path)
+        if bars:
+            loaded.append((path, bars))
+    if not loaded:
         raise HTTPException(
             status_code=404,
             detail={
                 "error": "kline_server_cache_miss",
                 "message": "服务器上暂无该组合的 K 线缓存，请先调用 POST /backtest/kline-cache/fetch 或在回测页点击「下载K线到服务器」。",
-                "cache_path": path,
+                "cache_path": paths[0],
             },
         )
     if periods > 0:
+        path, bars = max(loaded, key=lambda item: len(item[1]))
         if len(bars) < periods:
             raise HTTPException(
                 status_code=409,
@@ -3442,7 +3508,45 @@ def _load_bars_from_server_kline_cache(
                 },
             )
         return bars[-periods:] if len(bars) > periods else bars
-    return bars
+
+    exact_path = os.path.normcase(os.path.normpath(paths[0]))
+    exact = next(((path, bars) for path, bars in loaded if os.path.normcase(os.path.normpath(path)) == exact_path), None)
+    ref_end = _calendar_cache_reference_end(loaded)
+    shorter_floor = 0
+    for path, bars in loaded:
+        cache_days = _calendar_cache_day_from_path(path)
+        _first, last = _bars_date_bounds(bars)
+        if cache_days > 0 and cache_days < int(days) and _calendar_cache_same_end(last, ref_end, slack_days=0):
+            shorter_floor = max(shorter_floor, len(bars))
+    exact_end = _bars_date_bounds(exact[1])[1] if exact else None
+    if exact and _calendar_cache_same_end(exact_end, ref_end, slack_days=0) and len(exact[1]) >= shorter_floor:
+        return _trim_calendar_bars_to_days(exact[1], days, ref_end=ref_end)
+
+    same_end_candidates: list[tuple[str, list[Bar]]] = []
+    for path, bars in loaded:
+        _first, last = _bars_date_bounds(bars)
+        cache_days = _calendar_cache_day_from_path(path)
+        if _calendar_cache_same_end(last, ref_end, slack_days=0) and (cache_days == 0 or cache_days >= int(days)):
+            same_end_candidates.append((path, bars))
+    if same_end_candidates:
+        best_path, best_bars = max(same_end_candidates, key=lambda item: len(item[1]))
+        if len(best_bars) >= max(shorter_floor, len(exact[1]) if exact else 0):
+            return _trim_calendar_bars_to_days(best_bars, days, ref_end=ref_end)
+
+    best_path = exact[0] if exact else (loaded[0][0] if loaded else paths[0])
+    best_count = len(exact[1]) if exact else max((len(bars) for _path, bars in loaded), default=0)
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "kline_server_cache_incomplete",
+            "message": f"缓存窗口不完整：近 {int(days)} 天缓存少于较短窗口，请 force_refresh 重新下载。",
+            "bar_count": best_count,
+            "min_expected_bar_count": shorter_floor,
+            "days": int(days),
+            "reference_end": ref_end.isoformat() if ref_end else None,
+            "cache_path": best_path or paths[0],
+        },
+    )
 
 
 def _resolve_bars_for_backtest_compare(
@@ -6441,6 +6545,7 @@ def internal_longport_history_bars(
     days: int = 120,
     kline: BacktestKline = "1d",
     priority: Optional[str] = None,
+    fresh: bool = False,
     authorization: str | None = None,
     x_api_key: str | None = None,
     x_local_owner: str | None = None,
@@ -6449,30 +6554,40 @@ def internal_longport_history_bars(
         sym = str(symbol or "").strip().upper()
         if not sym:
             raise HTTPException(status_code=400, detail="symbol_required")
-        ds = max(10, min(3650, int(days)))
+        raw_days = max(1, min(3650, int(days)))
+        ds = raw_days if fresh else max(10, raw_days)
         need_est = _estimate_bars_upper_bound_calendar(ds, str(kline))
         owner_id = _optional_request_owner_id(authorization, x_local_owner, x_api_key)
-        gw = _gateway_get_json(
-            "/internal/longport/history-bars", {"symbol": sym, "days": int(ds), "kline": str(kline)}
-        )
-        if isinstance(gw, dict) and isinstance(gw.get("items"), list):
-            items = gw.get("items") or []
-            # 网关/单次接口常见「顶满 ~1000 根」截断：条数卡在千根附近且估算窗口需要更多根时，改用本地分页对齐拉取
-            suspicious_truncation = 999 <= len(items) <= 1010 and need_est > 1100
-            if items and not suspicious_truncation:
-                out = dict(gw)
-                out.setdefault("source", "gateway")
-                return out
+        if not fresh:
+            gw = _gateway_get_json(
+                "/internal/longport/history-bars", {"symbol": sym, "days": int(ds), "kline": str(kline)}
+            )
+            if isinstance(gw, dict) and isinstance(gw.get("items"), list):
+                items = gw.get("items") or []
+                # 网关/单次接口常见「顶满 ~1000 根」截断：条数卡在千根附近且估算窗口需要更多根时，改用本地分页对齐拉取
+                suspicious_truncation = 999 <= len(items) <= 1010 and need_est > 1100
+                if items and not suspicious_truncation:
+                    out = dict(gw)
+                    out.setdefault("source", "gateway")
+                    return out
 
         try:
-            bars = _fetch_bars_calendar_days(sym, ds, kline, _skip_gateway=True, owner_id=owner_id)
+            bars = _fetch_bars_calendar_days(
+                sym,
+                ds,
+                kline,
+                _skip_gateway=True,
+                owner_id=owner_id,
+                use_server_kline_cache=False if fresh else None,
+                bypass_mem_cache=bool(fresh),
+            )
         except Exception as e:
             if _is_longport_connect_error(e):
                 throttled_reset_contexts(lambda: reset_contexts(owner_id=owner_id), _RUNTIME_STATE)
                 bars = []
             else:
                 raise
-        source = "broker_sdk_or_cache"
+        source = "broker_sdk_fresh" if fresh else "broker_sdk_or_cache"
         if not bars:
             source = "empty"
         return {

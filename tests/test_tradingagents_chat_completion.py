@@ -11,6 +11,7 @@ dummy = type("_LongbridgeDummy", (), {})
 for name in [
     "AdjustType",
     "Config",
+    "ContentContext",
     "OrderSide",
     "OrderType",
     "Period",
@@ -144,6 +145,45 @@ class TradingAgentsChatCompletionTests(unittest.TestCase):
         self.assertEqual(view["agent_statuses"]["Market Analyst"]["status"], "in_progress")
         self.assertEqual(view["latest_report_section"]["section"], "market_report")
         self.assertEqual(len(view["agent_events"]), 2)
+
+    def test_internal_history_fresh_bypasses_server_cache(self) -> None:
+        calls: list[dict] = []
+
+        def fake_fetch(symbol, days, kline, _skip_gateway=False, owner_id=None, **kwargs):
+            calls.append(
+                {
+                    "symbol": symbol,
+                    "days": days,
+                    "kline": kline,
+                    "owner_id": owner_id,
+                    **kwargs,
+                }
+            )
+            return [
+                main.Bar(
+                    date=main.coerce_bar_datetime("2026-05-29T22:07:00"),
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1.0,
+                )
+            ]
+
+        with (
+            patch.object(main, "_gateway_get_json", return_value={"items": [{"date": "2026-05-28", "close": 100}]}),
+            patch.object(main, "_fetch_bars_calendar_days", fake_fetch),
+            patch.object(main, "require_local_identity") as require_local_identity,
+        ):
+            require_local_identity.return_value = types.SimpleNamespace(owner_id="alice")
+            resp = main.internal_longport_history_bars(symbol="QQQ.US", days=2, kline="1m", fresh=True, x_local_owner="alice")
+
+        self.assertEqual(resp["source"], "broker_sdk_fresh")
+        self.assertEqual(resp["days"], 2)
+        self.assertEqual(resp["items"][0]["date"], "2026-05-29T22:07:00")
+        self.assertEqual(calls[0]["owner_id"], "alice")
+        self.assertEqual(calls[0]["use_server_kline_cache"], False)
+        self.assertEqual(calls[0]["bypass_mem_cache"], True)
 
 
 if __name__ == "__main__":

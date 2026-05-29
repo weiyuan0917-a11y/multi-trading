@@ -117,6 +117,39 @@ def _seed_daily_kline_cache(tmp_path: Path, symbol: str = "QQQ.US", bars: int = 
     _write_json(tmp_path / "data" / "klines" / f"{stem}__1d__d60.json", {"items": items})
 
 
+def test_server_kline_cache_rejects_stale_exact_when_newer_shorter_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from fastapi import HTTPException
+
+    from api import main as main_mod
+
+    cache_dir = tmp_path / "data" / "klines"
+    monkeypatch.setattr(main_mod, "KLINE_SERVER_CACHE_DIR", str(cache_dir))
+
+    def write_cache(name: str, start: datetime, count: int) -> None:
+        items = []
+        for i in range(count):
+            dt = start + timedelta(days=i)
+            items.append({"date": dt.isoformat(), "open": 1, "high": 1, "low": 1, "close": i, "volume": 1})
+        _write_json(cache_dir / name, {"items": items})
+
+    today = datetime.now(timezone.utc).date()
+    stale_start = datetime.combine(today - timedelta(days=260), datetime.min.time(), tzinfo=timezone.utc)
+    fresh_start = datetime.combine(today - timedelta(days=120), datetime.min.time(), tzinfo=timezone.utc)
+    write_cache("QQQ_US__1m__d180.json", stale_start, 180)
+    write_cache("QQQ_US__1m__d120.json", fresh_start, 120)
+
+    with pytest.raises(HTTPException) as exc:
+        main_mod._load_bars_from_server_kline_cache("QQQ.US", "1m", 0, 180)
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "kline_server_cache_incomplete"
+    assert exc.value.detail["reference_end"] == (today - timedelta(days=1)).isoformat()
+
+
 def _passing_backtest(body: dict) -> dict:
     return {
         "bar_count": 390,

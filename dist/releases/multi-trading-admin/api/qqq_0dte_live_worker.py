@@ -1447,7 +1447,9 @@ def _append_decision_tail(
 
 def _fetch_bars(symbol: str, days: int, kline: str) -> tuple[list[Bar], str]:
     if _USE_API_PROXY:
-        q = urllib.parse.urlencode({"symbol": symbol.upper(), "days": int(days), "kline": str(kline), "priority": "high"})
+        q = urllib.parse.urlencode(
+            {"symbol": symbol.upper(), "days": int(days), "kline": str(kline), "priority": "high", "fresh": "true"}
+        )
         data = _api_get_json(f"/internal/longport/history-bars?{q}", timeout=max(_API_TIMEOUT, 20.0))
         items = data.get("items") if isinstance(data, dict) else None
         source = str(data.get("source") or "internal_longport") if isinstance(data, dict) else "internal_longport"
@@ -2640,6 +2642,7 @@ def run_loop(config_path: str) -> None:
                         "last_loop_at": loop_started,
                         "dry_run": dry_run,
                         "assume_bars_timezone": str(getattr(cfg, "assume_bars_timezone", None) or "UTC"),
+                        "bars_today": 0,
                         "bars_source": bars_source,
                         **rt_quote_fields,
                     }
