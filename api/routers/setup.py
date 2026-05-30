@@ -181,13 +181,29 @@ def setup_longport_diagnostics(
 def setup_start_services(body: dict[str, Any] = Body(...), authorization: str | None = Header(default=None), x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner")) -> dict[str, Any]:
     identity = require_local_identity(authorization, x_local_owner)
     if bool((body or {}).get("enable_auto_trader")):
-        require_identity_entitlement(identity, "stock_auto_trading")
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "ok": False,
+                "disabled": True,
+                "reason": "auto_trading_execution_removed_from_customer_public_source",
+                "feature": "stock_auto_trading",
+            },
+        )
     if (
         bool((body or {}).get("enable_qqq_0dte_live"))
         or bool((body or {}).get("enable_qqq_1dte_live"))
         or bool((body or {}).get("enable_stock_options_swing"))
     ):
-        require_identity_entitlement(identity, "option_auto_trading")
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "ok": False,
+                "disabled": True,
+                "reason": "auto_trading_execution_removed_from_customer_public_source",
+                "feature": "option_auto_trading",
+            },
+        )
     return rt.setup_start_services(body, owner_id=identity.owner_id)
 
 

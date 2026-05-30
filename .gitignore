@@ -80,3 +80,6 @@ logs/*.jsonl
 launcher_run_test.txt
 openbb_help_out.txt
 openbb_help_err.txt
+data/accounts/*.json
+api/auto_trader_config.json
+api/auto_trader_config.*.json
