@@ -41,6 +41,7 @@ def is_broker_connect_error(err: Exception | str) -> bool:
             "timed out",
             "connection refused",
             "breaker_open",
+            "connect_in_progress",
             "token empty",
             "401001",
             "credentials_required",

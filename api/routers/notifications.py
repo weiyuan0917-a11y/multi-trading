@@ -28,6 +28,8 @@ ROOT = os.path.abspath(
 )
 MCP_DIR = os.path.join(ROOT, "mcp_server")
 FEISHU_HTTP_TIMEOUT_SECONDS = 10
+_OWNER_ENV_APPLIED_AT: dict[str, float] = {}
+_OWNER_ENV_APPLY_TTL_SECONDS = 10.0
 
 
 def _load_notification_config(path: str) -> dict[str, Any]:
@@ -49,7 +51,11 @@ def _apply_owner_env(authorization: str | None, x_local_owner: str | None) -> st
 
         owner = require_local_owner(authorization, x_local_owner)
         if owner:
-            apply_light_session_env_for_user(owner, Path(ROOT))
+            now = time.monotonic()
+            key = str(owner).strip().lower()
+            if now - float(_OWNER_ENV_APPLIED_AT.get(key) or 0.0) >= _OWNER_ENV_APPLY_TTL_SECONDS:
+                apply_light_session_env_for_user(owner, Path(ROOT))
+                _OWNER_ENV_APPLIED_AT[key] = now
         return owner
     except Exception:
         return ""

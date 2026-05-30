@@ -1442,6 +1442,10 @@ def _broker_connect_error_detail(
         reason = "broker_connect_breaker_open"
         message = "券商连接刚刚失败过，系统正在短暂保护中。"
         hint = "请确认凭证无误后稍等几十秒再连接，或覆盖保存凭证后重试。"
+    elif "connect_in_progress" in lower:
+        reason = "broker_connect_in_progress"
+        message = "券商连接正在建立中，系统已避免重复连接。"
+        hint = "请稍等几秒后刷新；如果 VPN 或网络刚切换，请等网络稳定后再连接券商。"
 
     payload: dict[str, Any] = {
         "error": error,
@@ -2826,6 +2830,11 @@ def _raise_broker_connect_http_error(m: Any, err: Exception | str) -> None:
     raise m.HTTPException(status_code=503, detail=_broker_connect_error_detail(err))
 
 
+def _should_retry_broker_connect_error(err: Exception | str) -> bool:
+    text = str(err or "").lower()
+    return "breaker_open" not in text and "connect_in_progress" not in text
+
+
 def _with_trade_context_retry(
     operation_name: str,
     *,
@@ -2842,6 +2851,8 @@ def _with_trade_context_retry(
             last_err = e
             if not m._is_longport_connect_error(e):
                 raise
+            if not _should_retry_broker_connect_error(e):
+                break
             try:
                 m.ACCOUNT_REGISTRY.mark_broker_connect_error(e, account_id=account_id, owner_id=owner_id)
             except Exception:

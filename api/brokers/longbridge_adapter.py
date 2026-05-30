@@ -22,6 +22,7 @@ class LongBridgeAdapter(BrokerAdapter):
         "timed out",
         "connection refused",
         "breaker_open",
+        "connect_in_progress",
     )
 
     @staticmethod

@@ -19,6 +19,7 @@ _ROOT = os.path.abspath(
     or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 _ACCOUNTS_DATA_DIR = os.path.join(_ROOT, "data", "accounts")
+BROKER_CONNECT_IN_PROGRESS_SECONDS = max(2.0, float(os.getenv("BROKER_CONNECT_IN_PROGRESS_SECONDS", "8")))
 
 
 def _close_context(ctx: Any) -> None:
@@ -54,6 +55,7 @@ class AccountRecord:
     quote_ctx: Optional[Any] = None
     trade_ctx: Optional[Any] = None
     lock: threading.RLock = field(default_factory=threading.RLock)
+    connect_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class AccountRegistry:
@@ -335,25 +337,53 @@ class AccountRegistry:
                 rec.last_error = "broker_connect_breaker_open"
                 rec.status = "error"
                 raise RuntimeError("broker_connect_breaker_open")
-            adapter = get_broker_adapter(rec.broker_provider)
+
+        if not rec.connect_lock.acquire(blocking=False):
+            raise RuntimeError("broker_connect_in_progress")
+        try:
+            with rec.lock:
+                if rec.manual_disconnected:
+                    rec.last_error = "account_manual_disconnected"
+                    rec.status = "disconnected"
+                    self._persist_owner(rec.owner_id)
+                    raise ValueError(f"account_disconnected_manual_connect_required: {rec.account_id}")
+                if rec.quote_ctx is not None and rec.trade_ctx is not None:
+                    broker_service.bind_contexts_to_broker(rec.quote_ctx, rec.trade_ctx, rec.broker_provider)
+                    return rec.quote_ctx, rec.trade_ctx, rec.account_id
+                now = time.time()
+                if now < float(rec.connect_breaker_until_ts or 0.0):
+                    rec.last_error = "broker_connect_breaker_open"
+                    rec.status = "error"
+                    raise RuntimeError("broker_connect_breaker_open")
+                adapter = get_broker_adapter(rec.broker_provider)
+                rec.status = "connecting"
+                rec.last_error = None
+                rec.connect_breaker_until_ts = now + BROKER_CONNECT_IN_PROGRESS_SECONDS
+                self._persist_owner(rec.owner_id)
             try:
                 contexts = adapter.create_contexts(rec.credentials)
-                rec.quote_ctx = contexts.quote
-                rec.trade_ctx = contexts.trade
-                broker_service.bind_contexts_to_broker(rec.quote_ctx, rec.trade_ctx, rec.broker_provider)
-                rec.last_error = None
-                rec.last_init_at = datetime.now().isoformat()
-                rec.connect_breaker_until_ts = 0.0
-                rec.status = "ready"
-                self._persist_owner(rec.owner_id)
+                with rec.lock:
+                    rec.quote_ctx = contexts.quote
+                    rec.trade_ctx = contexts.trade
+                    broker_service.bind_contexts_to_broker(rec.quote_ctx, rec.trade_ctx, rec.broker_provider)
+                    rec.last_error = None
+                    rec.last_init_at = datetime.now().isoformat()
+                    rec.connect_breaker_until_ts = 0.0
+                    rec.status = "ready"
+                    self._persist_owner(rec.owner_id)
+                    return rec.quote_ctx, rec.trade_ctx, rec.account_id
             except Exception as e:
-                rec.last_error = str(e)
-                rec.status = "error"
-                if adapter.is_connect_error(e):
-                    rec.connect_breaker_until_ts = now + BROKER_CONNECT_BREAKER_SECONDS
-                self._persist_owner(rec.owner_id)
+                with rec.lock:
+                    rec.last_error = str(e)
+                    rec.status = "error"
+                    if adapter.is_connect_error(e):
+                        rec.connect_breaker_until_ts = time.time() + BROKER_CONNECT_BREAKER_SECONDS
+                    else:
+                        rec.connect_breaker_until_ts = 0.0
+                    self._persist_owner(rec.owner_id)
                 raise
-            return rec.quote_ctx, rec.trade_ctx, rec.account_id
+        finally:
+            rec.connect_lock.release()
 
     def mark_broker_connect_error(self, err: Exception | str, account_id: str | None = None, owner_id: str | None = None) -> None:
         rec = self.get_account_record(account_id, owner_id=owner_id)

@@ -16,6 +16,7 @@ const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_RETRIES = 3;
 const DEFAULT_GET_CACHE_TTL_MS = 15000;
 const memoryGetCache = new Map<string, { expiresAt: number; data: unknown }>();
+const inflightGetRequests = new Map<string, Promise<unknown>>();
 
 export class JsonApiError extends Error {
   status: number;
@@ -189,39 +190,61 @@ export function createJsonApiClient(config: JsonApiClientConfig) {
           return cached.data as T;
         }
       }
+      if (method === "GET") {
+        const pending = inflightGetRequests.get(cacheKey);
+        if (pending) {
+          return pending as Promise<T>;
+        }
+      }
 
-      for (let attempt = 0; attempt <= retries; attempt += 1) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        try {
-          const res = await fetch(url, {
-            ...init,
-            headers: baseHeaders,
-            cache: "no-store",
-            signal: controller.signal,
-          });
-          clearTimeout(timer);
-          if (!res.ok) {
-            throw new JsonApiError(normalizeErrorMessage(await res.text()), res.status, url);
-          }
-          const raw = await res.text();
-          const data = (raw ? JSON.parse(raw) : {}) as T;
-          if (method === "GET" && cacheTtlMs > 0) {
-            memoryGetCache.set(cacheKey, {
-              expiresAt: Date.now() + cacheTtlMs,
-              data,
+      const execute = async () => {
+        for (let attempt = 0; attempt <= retries; attempt += 1) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const res = await fetch(url, {
+              ...init,
+              headers: baseHeaders,
+              cache: "no-store",
+              signal: controller.signal,
             });
-          }
-          return data;
-        } catch (err) {
-          clearTimeout(timer);
-          lastErr = err;
-          if (attempt < retries) {
-            const backoffMs = 500 * 2 ** attempt;
-            const jitterMs = Math.floor(Math.random() * 300);
-            await sleep(backoffMs + jitterMs);
+            clearTimeout(timer);
+            if (!res.ok) {
+              throw new JsonApiError(normalizeErrorMessage(await res.text()), res.status, url);
+            }
+            const raw = await res.text();
+            const data = (raw ? JSON.parse(raw) : {}) as T;
+            if (method === "GET" && cacheTtlMs > 0) {
+              memoryGetCache.set(cacheKey, {
+                expiresAt: Date.now() + cacheTtlMs,
+                data,
+              });
+            }
+            return data;
+          } catch (err) {
+            clearTimeout(timer);
+            lastErr = err;
+            if (attempt < retries) {
+              const backoffMs = 500 * 2 ** attempt;
+              const jitterMs = Math.floor(Math.random() * 300);
+              await sleep(backoffMs + jitterMs);
+            }
           }
         }
+        throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+      };
+      const requestPromise = execute().finally(() => {
+        if (method === "GET" && inflightGetRequests.get(cacheKey) === requestPromise) {
+          inflightGetRequests.delete(cacheKey);
+        }
+      });
+      if (method === "GET") {
+        inflightGetRequests.set(cacheKey, requestPromise);
+      }
+      try {
+        return await requestPromise;
+      } catch (err) {
+        lastErr = err;
       }
     }
 
