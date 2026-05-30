@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 _SETUP_SERVICE_OP_LOCK = threading.RLock()
@@ -18,6 +19,39 @@ def _feishu_bot_launch_cmd(root: str, mcp_dir: str) -> list[str]:
     if os.path.isfile(backend_exe):
         return [backend_exe, "--worker=feishu_command_bot"]
     return [sys.executable, "-u", os.path.join(mcp_dir, "feishu_command_bot.py")]
+
+
+def _owner_env_for_subprocess(root: str, owner_id: str | None) -> dict[str, str]:
+    owner = str(owner_id or "").strip().lower()
+    if not owner:
+        return {}
+    try:
+        from config.user_env_store import resolve_user_env_with_defaults
+
+        return {str(k): str(v) for k, v in resolve_user_env_with_defaults(owner, Path(root)).items()}
+    except Exception:
+        return {}
+
+
+def _close_log_handle(handle: Any) -> None:
+    try:
+        if handle:
+            handle.close()
+    except Exception:
+        pass
+
+
+def _open_feishu_bot_log(root: str) -> Any:
+    try:
+        log_dir = os.path.join(root, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, "feishu_command_bot.log")
+        handle = open(path, "a", encoding="utf-8")
+        handle.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] launching feishu_command_bot\n")
+        handle.flush()
+        return handle
+    except Exception:
+        return subprocess.DEVNULL
 
 
 def start_services(
@@ -88,13 +122,29 @@ def start_services(
                 env = os.environ.copy()
                 env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
                 env["MULTITRADING_ROOT"] = root
-                managed_processes["feishu_bot"] = subprocess.Popen(  # noqa: S603
+                if owner_id:
+                    env["MT_LOCAL_OWNER_ID"] = str(owner_id).strip().lower()
+                    env.update(_owner_env_for_subprocess(root, owner_id))
+                _close_log_handle(managed_processes.pop("feishu_bot_log", None))
+                log_handle = _open_feishu_bot_log(root)
+                proc = subprocess.Popen(  # noqa: S603
                     _feishu_bot_launch_cmd(root, mcp_dir),
                     cwd=root,
                     env=env,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
                     **win_subprocess_silent_kwargs(),
                 )
-                started["feishu_bot"] = "started"
+                managed_processes["feishu_bot"] = proc
+                managed_processes["feishu_bot_log"] = log_handle
+                time.sleep(0.25)
+                exit_code = proc.poll()
+                if exit_code is None:
+                    started["feishu_bot"] = "started"
+                else:
+                    managed_processes.pop("feishu_bot", None)
+                    _close_log_handle(managed_processes.pop("feishu_bot_log", None))
+                    started["feishu_bot"] = f"failed_exit_code_{exit_code}"
         else:
             started["feishu_bot"] = "skipped"
         return {"ok": True, "started": started}
@@ -355,4 +405,3 @@ def stop_all_services(
             stopped["backend"] = "skipped"
 
         return {"ok": True, "stopped": stopped, "message": "停止命令已发送"}
-

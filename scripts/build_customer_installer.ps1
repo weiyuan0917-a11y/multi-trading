@@ -4,7 +4,8 @@ param(
   [switch]$SkipInno,
   [switch]$ReuseBackend,
   [switch]$ReuseFrontend,
-  [switch]$SkipSetupExe
+  [switch]$SkipSetupExe,
+  [switch]$NoStopProcesses
 )
 
 $ErrorActionPreference = "Stop"
@@ -316,11 +317,15 @@ $launcherIconPath = Join-Path $repo "assets\windows\multitrading-logo.ico"
 $licensePublicKeyPath = Resolve-LicensePublicKeyPath
 
 Write-Host "[1/9] Cleaning old customer build..."
-cmd.exe /c "taskkill /F /IM MultiTradingLauncher.exe >nul 2>nul"
-cmd.exe /c "taskkill /F /IM Backend.exe >nul 2>nul"
-cmd.exe /c "taskkill /F /IM CustomerLauncher.exe >nul 2>nul"
-Stop-ListenersOnPort 3010
-Stop-ListenersOnPort 8010
+if ($NoStopProcesses) {
+  Write-Host "[INFO] Skipping process shutdown checks (-NoStopProcesses)."
+} else {
+  cmd.exe /c "taskkill /F /IM MultiTradingLauncher.exe >nul 2>nul"
+  cmd.exe /c "taskkill /F /IM Backend.exe >nul 2>nul"
+  cmd.exe /c "taskkill /F /IM CustomerLauncher.exe >nul 2>nul"
+  Stop-ListenersOnPort 3010
+  Stop-ListenersOnPort 8010
+}
 if (Test-Path $releaseDir) {
   Remove-Item -LiteralPath $releaseDir -Recurse -Force
 }

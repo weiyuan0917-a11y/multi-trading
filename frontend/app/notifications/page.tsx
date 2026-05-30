@@ -53,6 +53,7 @@ export default function NotificationsPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [savingPrefs, setSavingPrefs] = useState(false);
+  const [testingFeishu, setTestingFeishu] = useState(false);
   const [message, setMessage] = useState("");
   const [showBuiltinReversalConfig, setShowBuiltinReversalConfig] = useState(false);
   const loadingRef = useRef(false);
@@ -61,12 +62,18 @@ export default function NotificationsPage() {
     if (loadingRef.current || (typeof document !== "undefined" && document.hidden)) return;
     loadingRef.current = true;
     try {
-      const [d, s] = await Promise.all([apiGet<any>("/notifications/status"), apiGet<any>("/setup/services/status")]);
-      setData(d);
-      setServiceStatus(s);
-      setError("");
-    } catch (e: any) {
-      setError(String(e.message || e));
+      const notificationTask = apiGet<any>("/notifications/status", { timeoutMs: 8000, retries: 0, cacheTtlMs: 0 })
+        .then((d) => {
+          setData(d);
+          setError("");
+        })
+        .catch((e: any) => {
+          setError(String(e.message || e));
+        });
+      const serviceTask = apiGet<any>("/setup/services/status", { timeoutMs: 5000, retries: 0, cacheTtlMs: 2000 })
+        .then((s) => setServiceStatus(s))
+        .catch(() => setServiceStatus((prev: any) => prev ?? {}));
+      await Promise.allSettled([notificationTask, serviceTask]);
     } finally {
       loadingRef.current = false;
     }
@@ -93,14 +100,38 @@ export default function NotificationsPage() {
   const startFeishuBot = async () => {
     setLoading(true);
     try {
-      await apiPost("/setup/services/start", { start_feishu_bot: true, enable_auto_trader: false });
-      setMessage("飞书机器人已启动");
+      const result = await apiPost<any>("/setup/services/start", { start_feishu_bot: true, enable_auto_trader: false });
+      const started = String(result?.started?.feishu_bot || "");
+      if (started.startsWith("failed_exit_code")) {
+        setError(`飞书机器人启动后立即退出：${started}`);
+      } else {
+        setMessage(started === "already_running" ? "飞书机器人已在运行" : "飞书机器人已启动");
+      }
       await loadStatus();
     } catch (e: any) {
       setError(String(e.message || e));
     } finally {
       setLoading(false);
       setTimeout(() => setMessage(""), 3000);
+    }
+  };
+
+  const testFeishu = async () => {
+    setTestingFeishu(true);
+    setError("");
+    try {
+      const result = await apiPost<any>("/notifications/test/feishu", {}, { timeoutMs: 15000, retries: 0 });
+      if (result?.ok) {
+        setMessage(result.message || "飞书测试消息已发送");
+      } else {
+        setError(result?.message || "飞书测试失败，请检查配置");
+      }
+      await loadStatus();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setTestingFeishu(false);
+      setTimeout(() => setMessage(""), 4000);
     }
   };
 
@@ -190,6 +221,9 @@ export default function NotificationsPage() {
     ? fbm.selected_conditions.map((x: unknown) => String(x))
     : BUILTIN_REVERSAL_CONDITIONS.map((x) => x.id);
   const symbolsText = Array.isArray(br.symbols) ? br.symbols.join("\n") : "";
+  const feishuBotRunning = !!serviceStatus?.feishu_bot_running;
+  const autoTraderRunning = !!serviceStatus?.auto_trader_scheduler_running;
+  const serviceStatusReady = !!serviceStatus;
 
   return (
     <PageShell>
@@ -202,8 +236,8 @@ export default function NotificationsPage() {
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <span className="tag-muted">飞书机器人 {serviceStatus?.feishu_bot_running ? "运行中" : "已停止"}</span>
-            <span className="tag-muted">自动调度 {serviceStatus?.auto_trader_scheduler_running ? "运行中" : "已停止"}</span>
+            <span className="tag-muted">飞书机器人 {serviceStatusReady ? (feishuBotRunning ? "运行中" : "已停止") : "读取中"}</span>
+            <span className="tag-muted">自动调度 {serviceStatusReady ? (autoTraderRunning ? "运行中" : "已停止") : "读取中"}</span>
           </div>
         </div>
       </div>
@@ -211,7 +245,7 @@ export default function NotificationsPage() {
       {error ? <div className="panel whitespace-pre-line border-rose-500/40 bg-rose-950/40 text-rose-200">{error}</div> : null}
       {message ? <div className="panel border-emerald-500/40 bg-emerald-950/30 text-emerald-200">{message}</div> : null}
 
-      {data && serviceStatus ? (
+      {data ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div className="panel space-y-3 border-slate-700/80 bg-slate-900/40">
             <div className="section-title text-slate-200">飞书配置</div>
@@ -222,28 +256,40 @@ export default function NotificationsPage() {
               </span>
             </div>
             <div className="text-sm text-slate-300">飞书机器人数量: {data.feishu_bots_count ?? 0}</div>
+            <div className="text-xs text-slate-500">
+              Webhook {data.feishu_webhook_bots_count ?? 0} · 应用机器人 {data.feishu_app_bots_count ?? 0} · 可推送目标{" "}
+              {data.feishu_push_targets_count ?? 0}
+            </div>
 
             <div className="border-t border-slate-700 pt-3">
               <div className="mb-2 flex items-center justify-between text-sm">
                 <span className="text-slate-200">飞书指令机器人:</span>
-                <span className={serviceStatus.feishu_bot_running ? "text-emerald-400" : "text-slate-500"}>
-                  {serviceStatus.feishu_bot_running ? "运行中" : "已停止"}
+                <span className={feishuBotRunning ? "text-emerald-400" : "text-slate-500"}>
+                  {serviceStatusReady ? (feishuBotRunning ? "运行中" : "已停止") : "读取中"}
                 </span>
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={startFeishuBot}
-                  disabled={loading || serviceStatus.feishu_bot_running}
+                  disabled={loading || !serviceStatusReady || feishuBotRunning}
                   className="btn-primary flex-1 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   开启
                 </button>
                 <button
                   onClick={stopFeishuBot}
-                  disabled={loading || !serviceStatus.feishu_bot_running}
+                  disabled={loading || !serviceStatusReady || !feishuBotRunning}
                   className="btn-secondary flex-1 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   关闭
+                </button>
+                <button
+                  type="button"
+                  onClick={testFeishu}
+                  disabled={testingFeishu}
+                  className="btn-secondary flex-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {testingFeishu ? "测试中..." : "测试飞书"}
                 </button>
               </div>
             </div>
@@ -262,21 +308,21 @@ export default function NotificationsPage() {
             <div className="border-t border-slate-700 pt-3">
               <div className="mb-2 flex items-center justify-between text-sm">
                 <span className="text-slate-200">自动交易调度器:</span>
-                <span className={serviceStatus.auto_trader_scheduler_running ? "text-emerald-400" : "text-slate-500"}>
-                  {serviceStatus.auto_trader_scheduler_running ? "运行中" : "已停止"}
+                <span className={autoTraderRunning ? "text-emerald-400" : "text-slate-500"}>
+                  {serviceStatusReady ? (autoTraderRunning ? "运行中" : "已停止") : "读取中"}
                 </span>
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={startAutoTrader}
-                  disabled={loading || serviceStatus.auto_trader_scheduler_running}
+                  disabled={loading || !serviceStatusReady || autoTraderRunning}
                   className="btn-primary flex-1 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   开启
                 </button>
                 <button
                   onClick={stopAutoTrader}
-                  disabled={loading || !serviceStatus.auto_trader_scheduler_running}
+                  disabled={loading || !serviceStatusReady || !autoTraderRunning}
                   className="btn-secondary flex-1 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   关闭

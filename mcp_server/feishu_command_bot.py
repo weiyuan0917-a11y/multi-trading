@@ -86,6 +86,25 @@ def _remove_pid_file() -> None:
 NOTIFICATION_CONFIG_PATH = os.path.join(_dir, "notification_config.json")
 
 
+def _bootstrap_cli_env() -> None:
+    try:
+        from pathlib import Path
+
+        owner = str(os.getenv("MT_LOCAL_OWNER_ID") or "").strip().lower()
+        if owner:
+            from config.user_env_store import resolve_user_env_with_defaults
+
+            data = resolve_user_env_with_defaults(owner, Path(_root))
+        else:
+            from config.user_env_store import combined_env_for_cli
+
+            data = combined_env_for_cli(Path(_root))
+        for _k, _v in data.items():
+            os.environ[_k] = str(_v)
+    except Exception:
+        pass
+
+
 def _load_feishu_app_config() -> dict:
     cfg = resolve_feishu_app_config(NOTIFICATION_CONFIG_PATH)
     if not cfg.get("app_id") or not cfg.get("app_secret"):
@@ -93,15 +112,7 @@ def _load_feishu_app_config() -> dict:
     return cfg
 
 
-try:
-    from pathlib import Path
-
-    from config.user_env_store import combined_env_for_cli
-
-    for _k, _v in combined_env_for_cli(Path(_root)).items():
-        os.environ[_k] = str(_v)
-except Exception:
-    pass
+_bootstrap_cli_env()
 
 FEISHU_APP = _load_feishu_app_config()
 APP_ID = FEISHU_APP.get("app_id", "")
@@ -1825,18 +1836,15 @@ def _release_single_instance() -> None:
 
 
 def main():
+    global APP_ID, APP_SECRET, FEISHU_APP, SCHEDULED_CHAT_ID
     if not _acquire_single_instance():
         sys.exit(0)
     atexit.register(_release_single_instance)
-    try:
-        from pathlib import Path
-
-        from config.user_env_store import combined_env_for_cli
-
-        for _k, _v in combined_env_for_cli(Path(_root)).items():
-            os.environ[_k] = str(_v)
-    except Exception:
-        pass
+    _bootstrap_cli_env()
+    FEISHU_APP = _load_feishu_app_config()
+    APP_ID = FEISHU_APP.get("app_id", "")
+    APP_SECRET = FEISHU_APP.get("app_secret", "")
+    SCHEDULED_CHAT_ID = FEISHU_APP.get("scheduled_chat_id", "")
     _write_pid_file()
     atexit.register(_remove_pid_file)
 

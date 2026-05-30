@@ -723,6 +723,10 @@ def _stop_feishu_bot_managed_or_pidfile() -> str:
             except Exception:
                 pass
             _managed_processes.pop("feishu_bot", None)
+            try:
+                _managed_processes.pop("feishu_bot_log", None).close()
+            except Exception:
+                pass
             return "stopped"
         except Exception as e:
             return f"error: {e}"

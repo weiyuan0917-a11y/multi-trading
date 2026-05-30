@@ -1,3 +1,0 @@
-﻿edition=admin
-created_at=2026-05-20T14:20:36.8011684+08:00
-source=D:\github\multi-trading

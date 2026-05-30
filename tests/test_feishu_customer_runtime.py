@@ -22,6 +22,15 @@ def test_feishu_bot_uses_backend_worker_in_customer_runtime(tmp_path, monkeypatc
         return _FakeProcess()
 
     monkeypatch.setattr(svc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        svc,
+        "_owner_env_for_subprocess",
+        lambda root, owner_id: {
+            "FEISHU_APP_ID": f"{owner_id}-app",
+            "FEISHU_APP_SECRET": "owner-secret",
+            "FEISHU_SCHEDULED_CHAT_ID": "owner-chat",
+        },
+    )
 
     result = svc.start_services(
         start_feishu_bot=True,
@@ -45,6 +54,10 @@ def test_feishu_bot_uses_backend_worker_in_customer_runtime(tmp_path, monkeypatc
     assert calls[0]["cmd"] == [str(backend), "--worker=feishu_command_bot"]
     assert calls[0]["cwd"] == str(root)
     assert calls[0]["env"]["MULTITRADING_ROOT"] == str(root)
+    assert calls[0]["env"]["MT_LOCAL_OWNER_ID"] == "davies"
+    assert calls[0]["env"]["FEISHU_APP_ID"] == "davies-app"
+    assert calls[0]["env"]["FEISHU_SCHEDULED_CHAT_ID"] == "owner-chat"
+    assert calls[0]["kwargs"]["stderr"] == svc.subprocess.STDOUT
     assert os.path.isdir(mcp_dir)
 
 

@@ -1,5 +1,0 @@
-# TradingAgents（TauricResearch）
-# PyPI 上部分版本依赖 chainlit，在 Python 3.14 上可能无法解析；此处固定从 GitHub 标签安装 0.2.4。
-# 使用与 uvicorn 相同的解释器，在项目根目录执行：
-#   pip install -r requirements-tradingagents.txt
-git+https://github.com/TauricResearch/TradingAgents.git@v0.2.4
