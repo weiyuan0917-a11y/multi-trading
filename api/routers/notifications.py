@@ -100,6 +100,25 @@ def _response_json(resp: requests.Response) -> dict[str, Any]:
         return {"raw": (resp.text or "")[:300]}
 
 
+def _response_log_id(resp: requests.Response) -> str:
+    headers = getattr(resp, "headers", {}) or {}
+    for header in ("X-Tt-Logid", "X-Request-Id", "X-Lark-Request-Id"):
+        value = str(headers.get(header) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _feishu_failure_hint(kind: str, stage: str | None = None) -> str:
+    if kind == "webhook":
+        return "请检查 Webhook 地址、签名密钥，以及机器人是否仍在目标群。"
+    if stage == "tenant_access_token":
+        return "请检查 App ID/App Secret 是否正确，飞书应用是否已启用或发布。"
+    if stage == "message":
+        return "请检查 scheduled_chat_id 是否为 oc_ 开头的群 ID，应用机器人是否已加入该群，并已开通/发布发送消息权限。"
+    return "请检查飞书应用凭证、目标群 ID 和机器人权限。"
+
+
 def _feishu_code_ok(value: Any) -> bool:
     return str(value).strip() == "0"
 
@@ -117,6 +136,7 @@ def _send_feishu_webhook_text(index: int, bot_config: dict[str, Any], text: str)
         data = _response_json(resp)
         code = data.get("code")
         ok = bool(resp.ok and _feishu_code_ok(code))
+        log_id = _response_log_id(resp)
         return {
             "kind": "webhook",
             "index": index,
@@ -124,9 +144,17 @@ def _send_feishu_webhook_text(index: int, bot_config: dict[str, Any], text: str)
             "status_code": resp.status_code,
             "code": code,
             "message": data.get("msg") or data.get("message") or "",
+            **({"log_id": log_id} if log_id else {}),
+            **({} if ok else {"hint": _feishu_failure_hint("webhook")}),
         }
     except Exception as exc:
-        return {"kind": "webhook", "index": index, "ok": False, "error": str(exc)[:300]}
+        return {
+            "kind": "webhook",
+            "index": index,
+            "ok": False,
+            "error": str(exc)[:300],
+            "hint": _feishu_failure_hint("webhook"),
+        }
 
 
 def _send_feishu_app_chat_text(feishu_cfg: dict[str, str], text: str) -> dict[str, Any]:
@@ -144,6 +172,7 @@ def _send_feishu_app_chat_text(feishu_cfg: dict[str, str], text: str) -> dict[st
         token_data = _response_json(token_resp)
         token = str(token_data.get("tenant_access_token") or "").strip()
         if not (token_resp.ok and _feishu_code_ok(token_data.get("code")) and token):
+            log_id = _response_log_id(token_resp)
             return {
                 "kind": "app_chat",
                 "ok": False,
@@ -151,6 +180,8 @@ def _send_feishu_app_chat_text(feishu_cfg: dict[str, str], text: str) -> dict[st
                 "status_code": token_resp.status_code,
                 "code": token_data.get("code"),
                 "message": token_data.get("msg") or token_data.get("message") or "",
+                **({"log_id": log_id} if log_id else {}),
+                "hint": _feishu_failure_hint("app_chat", "tenant_access_token"),
             }
         msg_resp = requests.post(
             "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
@@ -159,16 +190,25 @@ def _send_feishu_app_chat_text(feishu_cfg: dict[str, str], text: str) -> dict[st
             timeout=FEISHU_HTTP_TIMEOUT_SECONDS,
         )
         msg_data = _response_json(msg_resp)
+        ok = bool(msg_resp.ok and _feishu_code_ok(msg_data.get("code")))
+        log_id = _response_log_id(msg_resp)
         return {
             "kind": "app_chat",
-            "ok": bool(msg_resp.ok and _feishu_code_ok(msg_data.get("code"))),
+            "ok": ok,
             "stage": "message",
             "status_code": msg_resp.status_code,
             "code": msg_data.get("code"),
             "message": msg_data.get("msg") or msg_data.get("message") or "",
+            **({"log_id": log_id} if log_id else {}),
+            **({} if ok else {"hint": _feishu_failure_hint("app_chat", "message")}),
         }
     except Exception as exc:
-        return {"kind": "app_chat", "ok": False, "error": str(exc)[:300]}
+        return {
+            "kind": "app_chat",
+            "ok": False,
+            "error": str(exc)[:300],
+            "hint": _feishu_failure_hint("app_chat"),
+        }
 
 
 @router.get("/notifications/status")
@@ -231,6 +271,8 @@ def notifications_test_feishu(
         return {"ok": False, "message": msg, "targets": [], **status}
 
     ok = any(bool(item.get("ok")) for item in targets)
+    if not ok:
+        logger.warning("Feishu test failed: %s", json.dumps(targets, ensure_ascii=False, default=str))
     return {
         "ok": ok,
         "message": "飞书测试消息已发送，请检查目标群。" if ok else "飞书测试发送失败，请检查应用凭证、群 ID 或 Webhook。",

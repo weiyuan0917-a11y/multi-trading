@@ -46,6 +46,29 @@ function clonePrefs(p: unknown) {
   return JSON.parse(JSON.stringify(p ?? {}));
 }
 
+function formatFeishuTestFailure(result: any) {
+  const lines = [String(result?.message || "飞书测试失败，请检查配置")];
+  const targets = Array.isArray(result?.targets) ? result.targets : [];
+  for (const target of targets) {
+    const name =
+      target?.kind === "app_chat"
+        ? "飞书应用"
+        : target?.kind === "webhook"
+          ? `Webhook ${target?.index ?? ""}`.trim()
+          : String(target?.kind || "目标");
+    const parts = [name];
+    if (target?.stage) parts.push(`阶段=${target.stage}`);
+    if (target?.status_code) parts.push(`HTTP=${target.status_code}`);
+    if (target?.code !== undefined && target?.code !== null) parts.push(`code=${target.code}`);
+    if (target?.message) parts.push(`msg=${target.message}`);
+    if (target?.error) parts.push(`error=${target.error}`);
+    if (target?.log_id) parts.push(`log_id=${target.log_id}`);
+    lines.push(parts.join(" · "));
+    if (target?.hint) lines.push(`建议：${target.hint}`);
+  }
+  return lines.join("\n");
+}
+
 export default function NotificationsPage() {
   const [data, setData] = useState<any>(null);
   const [serviceStatus, setServiceStatus] = useState<any>(null);
@@ -116,25 +139,6 @@ export default function NotificationsPage() {
     }
   };
 
-  const testFeishu = async () => {
-    setTestingFeishu(true);
-    setError("");
-    try {
-      const result = await apiPost<any>("/notifications/test/feishu", {}, { timeoutMs: 15000, retries: 0 });
-      if (result?.ok) {
-        setMessage(result.message || "飞书测试消息已发送");
-      } else {
-        setError(result?.message || "飞书测试失败，请检查配置");
-      }
-      await loadStatus();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setTestingFeishu(false);
-      setTimeout(() => setMessage(""), 4000);
-    }
-  };
-
   const stopFeishuBot = async () => {
     setLoading(true);
     try {
@@ -146,6 +150,25 @@ export default function NotificationsPage() {
     } finally {
       setLoading(false);
       setTimeout(() => setMessage(""), 3000);
+    }
+  };
+
+  const testFeishu = async () => {
+    setTestingFeishu(true);
+    setError("");
+    try {
+      const result = await apiPost<any>("/notifications/test/feishu", {}, { timeoutMs: 15000, retries: 0 });
+      if (result?.ok) {
+        setMessage(result.message || "飞书测试消息已发送");
+      } else {
+        setError(formatFeishuTestFailure(result));
+      }
+      await loadStatus();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setTestingFeishu(false);
+      setTimeout(() => setMessage(""), 4000);
     }
   };
 
