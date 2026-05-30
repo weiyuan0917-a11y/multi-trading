@@ -488,7 +488,7 @@ def load_notification_config() -> NotificationManager:
         return manager
     
     try:
-        with open(NOTIFICATION_CONFIG_PATH, 'r', encoding='utf-8') as f:
+        with open(NOTIFICATION_CONFIG_PATH, 'r', encoding='utf-8-sig') as f:
             config = json.load(f)
         
         for bot_config in config.get("feishu_bots", []):

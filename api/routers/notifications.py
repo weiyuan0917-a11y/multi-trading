@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import Any
 
@@ -12,6 +13,7 @@ from api.notification_preferences import (
 )
 
 router = APIRouter(tags=["notifications"])
+logger = logging.getLogger(__name__)
 
 ROOT = os.path.abspath(
     os.getenv("MULTITRADING_ROOT")
@@ -20,13 +22,22 @@ ROOT = os.path.abspath(
 MCP_DIR = os.path.join(ROOT, "mcp_server")
 
 
+def _load_notification_config(path: str) -> dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("Failed to load notification config %s: %s", path, exc)
+        return {}
+
+
 @router.get("/notifications/status")
 def notifications_status() -> dict[str, Any]:
     cfg_path = os.path.join(MCP_DIR, "notification_config.json")
-    data: dict[str, Any] = {}
-    if os.path.exists(cfg_path):
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    data = _load_notification_config(cfg_path)
     feishu_cfg = resolve_feishu_app_config(cfg_path)
     env_override = any(
         bool(os.getenv(k))

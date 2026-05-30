@@ -25,6 +25,15 @@ function Require-File($Path, $Message) {
   }
 }
 
+function Set-Utf8NoBomFile([string]$Path, [string]$Content) {
+  $dir = Split-Path -Parent $Path
+  if ($dir) {
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  }
+  $encoding = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
 function Stop-ListenersOnPort([int]$Port) {
   try {
     $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -409,7 +418,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $appDir "logs") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $appDir "config") | Out-Null
 $mcpRuntimeDir = Join-Path $appDir "mcp_server"
 New-Item -ItemType Directory -Force -Path $mcpRuntimeDir | Out-Null
-@{
+$notificationConfigJson = @{
   feishu_app = @{
     app_id = ""
     app_secret = ""
@@ -425,10 +434,11 @@ New-Item -ItemType Directory -Force -Path $mcpRuntimeDir | Out-Null
     bottom_reversal_watch = @{ enabled = $false; symbols = @(); poll_interval_seconds = 300; only_on_edge = $true; cooldown_minutes = 120 }
     feishu_builtin_reversal_monitor = @{ enabled = $false; selection_mode = "multi"; selected_conditions = @("rsi_rebound", "macd_bullish_cross_below_zero", "bollinger_rebound", "hammer_candle", "volume_rebound", "ma5_cross_ma20") }
   }
-} | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 -Path (Join-Path $mcpRuntimeDir "notification_config.json")
+} | ConvertTo-Json -Depth 8
+Set-Utf8NoBomFile -Path (Join-Path $mcpRuntimeDir "notification_config.json") -Content ($notificationConfigJson + "`n")
 Copy-Item -LiteralPath $licensePublicKeyPath -Destination (Join-Path $appDir "config\local_license_public.pem") -Force
 Remove-Item -LiteralPath (Join-Path $appDir "data\user_env") -Recurse -Force -ErrorAction SilentlyContinue
-@"
+$customerEnvText = @"
 MT_BUILD_TARGET=customer
 NEXT_PUBLIC_MT_BUILD_TARGET=customer
 LONGPORT_API_PORT=8010
@@ -436,19 +446,11 @@ LONGPORT_WEB_PORT=3010
 LOCAL_AGENT_ALLOW_USER_OWNERS=true
 LOCAL_LICENSE_PUBLIC_KEY_PATH=config\local_license_public.pem
 LOCAL_LICENSE_ALLOW_UNSIGNED=false
-"@ | Set-Content -Encoding UTF8 -Path (Join-Path $appDir ".env")
+"@
+Set-Utf8NoBomFile -Path (Join-Path $appDir ".env") -Content $customerEnvText
+Set-Utf8NoBomFile -Path (Join-Path $appDir ".env.example") -Content $customerEnvText
 
-@"
-MT_BUILD_TARGET=customer
-NEXT_PUBLIC_MT_BUILD_TARGET=customer
-LONGPORT_API_PORT=8010
-LONGPORT_WEB_PORT=3010
-LOCAL_AGENT_ALLOW_USER_OWNERS=true
-LOCAL_LICENSE_PUBLIC_KEY_PATH=config\local_license_public.pem
-LOCAL_LICENSE_ALLOW_UNSIGNED=false
-"@ | Set-Content -Encoding UTF8 -Path (Join-Path $appDir ".env.example")
-
-@"
+$customerReadmeText = @"
 MultiTrading Customer Edition
 
 How to start:
@@ -464,9 +466,10 @@ Notes:
 - Feishu push uses data\user_env plus mcp_server\notification_config.json; no separate Python install is required.
 - License verification uses config\local_license_public.pem.
 - Customers do not need to install Python, Node.js, or npm.
-"@ | Set-Content -Encoding UTF8 -Path (Join-Path $appDir "README_CUSTOMER.txt")
+"@
+Set-Utf8NoBomFile -Path (Join-Path $appDir "README_CUSTOMER.txt") -Content $customerReadmeText
 
-@{
+$manifestJson = @{
   version = $Version
   built_at = (Get-Date).ToUniversalTime().ToString("o")
   source_root = $repo
@@ -483,11 +486,12 @@ Notes:
     "feishu_notification_config",
     "rsa_license_verification_public_key"
   )
-} | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -Path (Join-Path $appDir "customer_build_manifest.json")
+} | ConvertTo-Json -Depth 5
+Set-Utf8NoBomFile -Path (Join-Path $appDir "customer_build_manifest.json") -Content ($manifestJson + "`n")
 
 $issPath = Join-Path $releaseDir "MultiTradingCustomer.iss"
 $appDirEsc = $appDir.Replace("\", "\\")
-@"
+$issText = @"
 #define MyAppName "MultiTrading"
 #define MyAppVersion "$Version"
 #define MyAppPublisher "MultiTrading"
@@ -522,7 +526,8 @@ Name: "{commondesktop}\MultiTrading"; Filename: "{app}\MultiTradingLauncher.exe"
 
 [Run]
 Filename: "{app}\MultiTradingLauncher.exe"; Description: "Launch MultiTrading"; Flags: nowait postinstall skipifsilent
-"@ | Set-Content -Encoding UTF8 -Path $issPath
+"@
+Set-Utf8NoBomFile -Path $issPath -Content $issText
 
 Write-Host "[8/9] Building self-contained customer setup exe..."
 if ($SkipSetupExe) {

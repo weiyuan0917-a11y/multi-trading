@@ -15,7 +15,7 @@ def _read_notification_file(notification_config_path: str) -> dict[str, Any]:
     if not notification_config_path or not os.path.exists(notification_config_path):
         return {}
     try:
-        with open(notification_config_path, "r", encoding="utf-8") as f:
+        with open(notification_config_path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception:
