@@ -52,6 +52,7 @@ class _FakeMain:
 class _FakeAccountRegistry:
     def __init__(self):
         self.default_account_id = "old-account"
+        self.accounts = {"old-account": True, "new-account": True}
 
     def get_default_account_id(self, owner_id=None):
         return self.default_account_id
@@ -83,6 +84,45 @@ class _FakeAccountRegistry:
 
     def has_connected_account(self, owner_id=None):
         return False
+
+    def get_account_record(self, account_id=None, owner_id=None):
+        aid = account_id or self.default_account_id
+        if aid not in self.accounts:
+            raise ValueError(f"account_not_found: {aid}")
+        return SimpleNamespace(
+            account_id=aid,
+            broker_provider="longbridge",
+            quote_ctx=object(),
+            trade_ctx=object(),
+            status="ready",
+            manual_disconnected=False,
+        )
+
+    def delete_account(self, account_id, owner_id=None):
+        if account_id not in self.accounts:
+            raise ValueError(f"account_not_found: {account_id}")
+        del self.accounts[account_id]
+        if self.default_account_id == account_id:
+            self.default_account_id = next(iter(self.accounts), "")
+        return SimpleNamespace(
+            account_id=account_id,
+            broker_provider="longbridge",
+            quote_ctx=None,
+            trade_ctx=None,
+            status="deleted",
+            manual_disconnected=True,
+        )
+
+    def list_accounts(self, owner_id=None):
+        return [
+            {
+                "account_id": aid,
+                "broker_provider": "longbridge",
+                "is_default": aid == self.default_account_id,
+                "status": "registered",
+            }
+            for aid in self.accounts
+        ]
 
 
 class _FakeMainForAccountSwitch:
@@ -177,6 +217,30 @@ class TestTradeRuntimeBridge(unittest.TestCase):
 
         self.assertTrue(out["all_accounts_disconnected"])
         self.assertIn("stock_options_swing", set(fake_main.stop_calls))
+
+    def test_delete_connected_account_removes_record_and_stops_workers_when_last_connected(self):
+        fake_main = _FakeMainForAccountSwitch()
+        fake_main.ACCOUNT_REGISTRY.accounts = {"new-account": True}
+        fake_main.ACCOUNT_REGISTRY.default_account_id = "new-account"
+        with patch("api.runtime_bridge._m", return_value=fake_main):
+            out = rt.setup_account_delete(account_id="new-account", owner_id="davies")
+
+        self.assertTrue(out["deleted"])
+        self.assertTrue(out["was_connected"])
+        self.assertEqual([], out["remaining_accounts"])
+        self.assertIsNone(out["default_account_id"])
+        self.assertIn("stock_options_swing", set(fake_main.stop_calls))
+
+    def test_setup_accounts_does_not_recreate_default_when_empty(self):
+        fake_main = _FakeMainForAccountSwitch()
+        fake_main.ACCOUNT_REGISTRY.accounts = {}
+        fake_main.ACCOUNT_REGISTRY.default_account_id = ""
+        with patch("api.runtime_bridge._m", return_value=fake_main):
+            out = rt.setup_accounts(owner_id="davies")
+
+        self.assertTrue(out["ok"])
+        self.assertEqual([], out["accounts"])
+        self.assertIsNone(out["default_account_id"])
 
     def test_start_worker_syncs_config_to_current_default_account_first(self):
         fake_main = _FakeMainForAccountSwitch()

@@ -17,7 +17,7 @@ from mcp_server.risk_manager import load_config, save_config
 from runtime_process_utils import is_pid_alive, read_pid_file
 
 from api.auto_trader_research import get_research_status
-from api.auto_trader import AutoTraderService, archive_legacy_unscoped_signals, summarize_legacy_unscoped_signals
+from api.auto_trader import AutoTraderService, archive_legacy_unscoped_signals, prune_persisted_signals, summarize_legacy_unscoped_signals
 from api.brokers import BrokerCredentials
 from api.schemas_auto_trader import (
     AutoTraderConfirmBody,
@@ -426,6 +426,103 @@ def _broker_credentials_from_setup_body(m: Any, parsed: SetupAccountRegisterBody
                 detail="missing_broker_credentials (need server_public_key/client_private_key PEM for fosun SDK)",
             )
         return BrokerCredentials(app_key=api_key, app_secret="", access_token=sub_account_id, extras=extras)
+
+    if provider == "usmart":
+        trade_host = str(raw_credentials.get("trade_host") or raw_credentials.get("usmart_trade_host") or parsed.usmart_trade_host or "").strip()
+        quote_host = str(raw_credentials.get("quote_host") or raw_credentials.get("usmart_quote_host") or parsed.usmart_quote_host or "").strip()
+        x_channel = str(raw_credentials.get("x_channel") or raw_credentials.get("usmart_x_channel") or parsed.usmart_x_channel or "").strip()
+        phone_number = str(raw_credentials.get("phone_number") or raw_credentials.get("usmart_phone_number") or parsed.usmart_phone_number or "").strip()
+        login_password = str(
+            raw_credentials.get("login_password")
+            or raw_credentials.get("usmart_login_password")
+            or parsed.usmart_login_password
+            or ""
+        ).strip()
+        trade_password = str(
+            raw_credentials.get("trade_password")
+            or raw_credentials.get("usmart_trade_password")
+            or parsed.usmart_trade_password
+            or ""
+        ).strip()
+        server_public_key = str(
+            raw_credentials.get("server_public_key")
+            or raw_credentials.get("usmart_server_public_key")
+            or parsed.usmart_server_public_key
+            or ""
+        ).strip()
+        client_private_key = str(
+            raw_credentials.get("client_private_key")
+            or raw_credentials.get("usmart_client_private_key")
+            or parsed.usmart_client_private_key
+            or ""
+        ).strip()
+        extras = {
+            "trade_host": trade_host,
+            "quote_host": quote_host,
+            "x_lang": raw_credentials.get("x_lang") or raw_credentials.get("usmart_x_lang") or parsed.usmart_x_lang or "1",
+            "x_channel": x_channel,
+            "area_code": raw_credentials.get("area_code") or raw_credentials.get("usmart_area_code") or parsed.usmart_area_code or "86",
+            "phone_number": phone_number,
+            "login_password": login_password,
+            "trade_password": trade_password,
+            "server_public_key": server_public_key,
+            "client_private_key": client_private_key,
+            "timeout_seconds": raw_credentials.get("timeout_seconds")
+            or raw_credentials.get("usmart_timeout_seconds")
+            or parsed.usmart_timeout_seconds
+            or "",
+        }
+        extras.update(
+            {
+                str(k): v
+                for k, v in raw_credentials.items()
+                if str(k)
+                not in {
+                    "trade_host",
+                    "usmart_trade_host",
+                    "quote_host",
+                    "usmart_quote_host",
+                    "x_lang",
+                    "usmart_x_lang",
+                    "x_channel",
+                    "usmart_x_channel",
+                    "area_code",
+                    "usmart_area_code",
+                    "phone_number",
+                    "usmart_phone_number",
+                    "login_password",
+                    "usmart_login_password",
+                    "trade_password",
+                    "usmart_trade_password",
+                    "server_public_key",
+                    "usmart_server_public_key",
+                    "client_private_key",
+                    "usmart_client_private_key",
+                    "timeout_seconds",
+                    "usmart_timeout_seconds",
+                }
+            }
+        )
+        missing = [
+            name
+            for name, value in {
+                "trade_host": trade_host,
+                "quote_host": quote_host,
+                "x_channel": x_channel,
+                "phone_number": phone_number,
+                "login_password": login_password,
+                "trade_password": trade_password,
+                "server_public_key": server_public_key,
+                "client_private_key": client_private_key,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise m.HTTPException(
+                status_code=400,
+                detail=f"missing_broker_credentials (need {','.join(missing)} for usmart)",
+            )
+        return BrokerCredentials(app_key=x_channel, app_secret=login_password, access_token=phone_number, extras=extras)
 
     key = str(
         raw_credentials.get("app_key")
@@ -1274,12 +1371,14 @@ def setup_longport_diagnostics(probe: bool = False, owner_id: str | None = None)
 def setup_accounts(owner_id: str) -> dict[str, Any]:
     m = _m()
     items = m.ACCOUNT_REGISTRY.list_accounts(owner_id=owner_id) if hasattr(m, "ACCOUNT_REGISTRY") else []
-    try:
-        default_account_id = (
-            m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id) if hasattr(m, "ACCOUNT_REGISTRY") else None
-        )
-    except Exception:
-        default_account_id = None
+    default_account_id = None
+    if items:
+        try:
+            default_account_id = (
+                m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id) if hasattr(m, "ACCOUNT_REGISTRY") else None
+            )
+        except Exception:
+            default_account_id = None
     return {"ok": True, "default_account_id": default_account_id, "accounts": items}
 
 
@@ -1530,6 +1629,96 @@ def setup_account_disconnect(account_id: str, owner_id: str) -> dict[str, Any]:
     _sync_fee_runtime_after_account_change()
     _clear_setup_services_status_cache(owner_id)
     return out
+
+
+def setup_account_delete(account_id: str, owner_id: str) -> dict[str, Any]:
+    m = _m()
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise m.HTTPException(status_code=400, detail="account_id_required")
+    try:
+        deleting_rec = m.ACCOUNT_REGISTRY.get_account_record(aid, owner_id=owner_id)
+    except ValueError as e:
+        raise m.HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise m.HTTPException(status_code=400, detail=str(e))
+
+    was_connected = bool(
+        deleting_rec is not None
+        and not bool(getattr(deleting_rec, "manual_disconnected", False))
+        and str(getattr(deleting_rec, "status", "") or "").strip().lower() != "disconnected"
+    )
+    try:
+        was_default = str(m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id)) == aid
+    except Exception:
+        was_default = False
+
+    try:
+        rec = m.ACCOUNT_REGISTRY.delete_account(aid, owner_id=owner_id)
+    except ValueError as e:
+        raise m.HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise m.HTTPException(status_code=400, detail=str(e))
+
+    try:
+        remaining_accounts = m.ACCOUNT_REGISTRY.list_accounts(owner_id=owner_id)
+    except Exception:
+        remaining_accounts = []
+    try:
+        default_account_id = m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id) if remaining_accounts else None
+    except Exception:
+        default_account_id = None
+
+    auto_stop_results: list[dict[str, Any]] = []
+    all_accounts_disconnected = not bool(m.ACCOUNT_REGISTRY.has_connected_account(owner_id=owner_id))
+    if was_connected and all_accounts_disconnected:
+        process_stops: list[tuple[str, Any]] = [
+            ("auto_trader", getattr(m, "_stop_auto_trader_worker", None)),
+            ("qqq_0dte", getattr(m, "_stop_qqq_0dte_live_worker", None)),
+            ("qqq_1dte", getattr(m, "_stop_qqq_1dte_live_worker", None)),
+            ("stock_options_swing", getattr(m, "_stop_stock_options_swing_worker", None)),
+        ]
+        stop_targets = [(process_name, stop_fn) for process_name, stop_fn in process_stops if callable(stop_fn)]
+        if stop_targets:
+            with ThreadPoolExecutor(max_workers=len(stop_targets)) as pool:
+                futures = {
+                    pool.submit(stop_fn, timeout_seconds=5.0): process_name
+                    for process_name, stop_fn in stop_targets
+                }
+                for fut in as_completed(futures):
+                    process_name = futures[fut]
+                    try:
+                        stop_status = str(fut.result())
+                    except Exception as e:
+                        stop_status = f"error:{e}"
+                    auto_stop_results.append(
+                        {
+                            "process": process_name,
+                            "stop_status": stop_status,
+                            "reason": "account_deleted",
+                        }
+                    )
+
+    if remaining_accounts and owner_id == "__system__" and hasattr(m, "_sync_runtime_state_from_default_account"):
+        try:
+            m._sync_runtime_state_from_default_account()
+        except Exception:
+            pass
+    _sync_fee_runtime_after_account_change()
+    _clear_setup_services_status_cache(owner_id)
+    return {
+        "ok": True,
+        "account_id": aid,
+        "broker_provider": str(getattr(rec, "broker_provider", "") or ""),
+        "deleted": True,
+        "was_default": was_default,
+        "was_connected": was_connected,
+        "default_account_id": default_account_id,
+        "remaining_accounts": remaining_accounts,
+        "all_accounts_disconnected": all_accounts_disconnected,
+        "auto_stopped_processes": auto_stop_results,
+        "auto_stopped_workers": auto_stop_results,
+    }
 
 
 def setup_start_services(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
@@ -1908,13 +2097,12 @@ def _auto_trading_setup_stop_body(module_id: str) -> dict[str, Any]:
 
 def auto_trading_module_start(module_id: str, body: dict[str, Any] | None = None, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
+    result = setup_start_services(_auto_trading_setup_start_body(mid, body), owner_id=owner_id)
     return {
-        "ok": False,
+        "ok": True,
         "module_id": mid,
         "action": "start",
-        "disabled": True,
-        "reason": "auto_trading_removed",
-        "result": {"ok": False, "reason": "auto_trading_removed"},
+        "result": result,
         "module": _auto_trading_module_status_from_services(mid, owner_id=owner_id),
     }
 
@@ -1934,14 +2122,13 @@ def auto_trading_module_stop(module_id: str, body: dict[str, Any] | None = None,
 def auto_trading_module_restart(module_id: str, body: dict[str, Any] | None = None, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
     stopped = setup_stop_services(_auto_trading_setup_stop_body(mid), owner_id=owner_id)
+    started = setup_start_services(_auto_trading_setup_start_body(mid, body), owner_id=owner_id)
     return {
-        "ok": False,
+        "ok": True,
         "module_id": mid,
         "action": "restart",
-        "disabled": True,
-        "reason": "auto_trading_removed",
         "stopped": stopped,
-        "started": {"ok": False, "reason": "auto_trading_removed"},
+        "started": started,
         "module": _auto_trading_module_status_from_services(mid, owner_id=owner_id),
     }
 
@@ -2433,33 +2620,67 @@ def backtest_kline_cache_fetch(body: dict[str, Any]) -> dict[str, Any]:
         bars0, meta0 = m._read_server_kline_cache_file(path)
         if bars0 and (periods <= 0 or len(bars0) >= periods):
             use = bars0[-periods:] if periods > 0 and len(bars0) > periods else bars0
-            return {
-                "ok": True,
-                "cached": True,
-                "symbol": sym,
-                "kline": str(kline),
-                "periods": periods,
-                "days": days,
-                "bar_count": len(use),
-                "cache_path": path,
-                "source": source,
-                "meta": meta0,
-            }
-    if source not in {"auto", "longbridge", "longport"}:
+            incomplete = (
+                m._server_kline_calendar_cache_incomplete(sym, kline, days, use)
+                if periods <= 0 and hasattr(m, "_server_kline_calendar_cache_incomplete")
+                else None
+            )
+            if not incomplete:
+                return {
+                    "ok": True,
+                    "cached": True,
+                    "symbol": sym,
+                    "kline": str(kline),
+                    "periods": periods,
+                    "days": days,
+                    "bar_count": len(use),
+                    "cache_path": path,
+                    "source": source,
+                    "meta": meta0,
+                }
+            meta0 = dict(meta0 or {})
+            meta0["auto_repair_reason"] = incomplete
+            force_refresh_due_to_incomplete = True
+        else:
+            force_refresh_due_to_incomplete = False
+    else:
+        force_refresh_due_to_incomplete = False
+    if force_refresh_due_to_incomplete and source in {"auto", "longbridge", "longport"} and periods <= 0:
+        bars = m._fetch_bars_calendar_days(sym, days, kline, _skip_gateway=True)
+        repaired_from = "auto_repair_incomplete_cache"
+    elif source not in {"auto", "longbridge", "longport"}:
         fetch_days = days if periods <= 0 else max(days, periods * 2)
         bars = m._fetch_public_market_bars(sym, fetch_days, kline, limit=periods, source=source)
         bars = bars[-periods:] if periods > 0 and len(bars) > periods else bars
+        repaired_from = ""
     elif periods > 0:
         bars = m._fetch_bars_by_periods(sym, periods, kline)
         bars = bars[-periods:] if len(bars) > periods else bars
+        repaired_from = ""
     else:
         bars = m._fetch_bars_calendar_days(sym, days, kline)
+        repaired_from = ""
     if not bars:
         raise m.HTTPException(status_code=400, detail="无法获取历史数据")
+    incomplete = (
+        m._server_kline_calendar_cache_incomplete(sym, kline, days, bars)
+        if periods <= 0 and hasattr(m, "_server_kline_calendar_cache_incomplete")
+        else None
+    )
+    if incomplete:
+        raise m.HTTPException(
+            status_code=409,
+            detail={
+                "error": "kline_server_cache_incomplete",
+                "message": "K线下载结果不完整，已拒绝覆盖现有缓存；请改用较短窗口或保留安装包内置缓存。",
+                **incomplete,
+            },
+        )
     m._write_server_kline_cache_file(path, symbol=sym, kline=str(kline), periods=periods, days=days, bars=bars)
     return {
         "ok": True,
         "cached": False,
+        "repaired": bool(repaired_from),
         "symbol": sym,
         "kline": str(kline),
         "periods": periods,
@@ -2467,7 +2688,7 @@ def backtest_kline_cache_fetch(body: dict[str, Any]) -> dict[str, Any]:
         "bar_count": len(bars),
         "cache_path": path,
         "source": source,
-        "meta": {"saved_at": m.datetime.now(m.timezone.utc).isoformat(), "bar_count": len(bars), "source": source},
+        "meta": {"saved_at": m.datetime.now(m.timezone.utc).isoformat(), "bar_count": len(bars), "source": source, "repair": repaired_from},
     }
 
 
@@ -3242,6 +3463,123 @@ def stock_options_swing_default_config() -> dict[str, Any]:
     }
 
 
+def qqq_0dte_quote_collector_default_config() -> dict[str, Any]:
+    from api.services.qqq_0dte_quote_store import DEFAULT_DB_PATH
+
+    return {
+        "enabled": True,
+        "underlying": "QQQ.US",
+        "strike_window": 15,
+        "poll_seconds": 60,
+        "chain_refresh_seconds": 300,
+        "collect_start_hhmm_et": "09:25",
+        "collect_end_hhmm_et": "16:05",
+        "include_calls": True,
+        "include_puts": True,
+        "standard_only": False,
+        "fallback_depth": True,
+        "depth_fallback_max_symbols_per_poll": 80,
+        "db_path": DEFAULT_DB_PATH,
+        "account_id": None,
+        "broker_provider": None,
+    }
+
+
+def qqq_0dte_quote_collector_config_path(owner_id: str | None = None) -> str:
+    m = _m()
+    owner = _normalize_owner_id(owner_id)
+    if owner:
+        return _owner_data_dir(owner, "qqq_0dte_quote_collector", "collector_config.json")
+    return os.path.join(m.ROOT, "data", "qqq_0dte_quote_collector", "collector_config.json")
+
+
+def qqq_0dte_quote_collector_config_get(owner_id: str | None = None) -> dict[str, Any]:
+    path = qqq_0dte_quote_collector_config_path(owner_id)
+    legacy_path = os.path.join(_m().ROOT, "data", "qqq_0dte_quote_collector", "collector_config.json")
+    base = qqq_0dte_quote_collector_default_config()
+    data = _read_json_path(path)
+    if not data and path != legacy_path:
+        data = _read_json_path(legacy_path)
+    out = {**base, **(data if isinstance(data, dict) else {})}
+    owner = _normalize_owner_id(owner_id)
+    if owner:
+        out["owner_id"] = owner
+    return out
+
+
+def qqq_0dte_quote_collector_config_put(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    cur = qqq_0dte_quote_collector_config_get(owner_id=owner_id)
+    patch = dict(body if isinstance(body, dict) else {})
+    allowed = set(qqq_0dte_quote_collector_default_config()) | {"owner_id"}
+    for key in list(patch):
+        if key not in allowed:
+            patch.pop(key, None)
+    next_cfg = {**cur, **patch}
+    next_cfg["underlying"] = str(next_cfg.get("underlying") or "QQQ.US").strip().upper()
+    if "." not in next_cfg["underlying"]:
+        next_cfg["underlying"] += ".US"
+    next_cfg["strike_window"] = max(1, min(100, int(next_cfg.get("strike_window") or 15)))
+    next_cfg["poll_seconds"] = max(5, min(3600, int(next_cfg.get("poll_seconds") or 60)))
+    next_cfg["depth_fallback_max_symbols_per_poll"] = max(
+        0,
+        min(500, int(next_cfg.get("depth_fallback_max_symbols_per_poll") or 0)),
+    )
+    owner = _normalize_owner_id(owner_id)
+    if owner:
+        next_cfg["owner_id"] = owner
+    path = qqq_0dte_quote_collector_config_path(owner_id)
+    _write_json_path(path, next_cfg)
+    return {"ok": True, "path": path, "config": next_cfg}
+
+
+def qqq_0dte_quote_collector_runtime(owner_id: str | None = None) -> dict[str, Any]:
+    m = _m()
+    rt = m._qqq_0dte_quote_collector_runtime_status(owner_id=owner_id)
+    cfg = qqq_0dte_quote_collector_config_get(owner_id=owner_id)
+    from api.services.qqq_0dte_quote_store import quote_store_summary
+
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    return {
+        "ok": True,
+        "config": cfg,
+        "runtime": rt,
+        "store": quote_store_summary(str(cfg.get("db_path") or ""), day_et=today),
+    }
+
+
+def qqq_0dte_quote_collector_start(owner_id: str | None = None) -> dict[str, Any]:
+    owner = _normalize_owner_id(owner_id)
+    if not owner:
+        raise _m().HTTPException(status_code=401, detail="unauthorized")
+    cfg = qqq_0dte_quote_collector_config_get(owner_id=owner)
+    account_id = str((cfg or {}).get("account_id") or "").strip() or None
+    try:
+        rec = _m().ACCOUNT_REGISTRY.get_account_record(account_id=account_id, owner_id=owner)
+    except ValueError as e:
+        raise _m().HTTPException(status_code=400, detail=f"quote_collector_account_not_ready: {e}")
+    if bool(rec.manual_disconnected) or str(rec.status or "").strip().lower() == "disconnected":
+        raise _m().HTTPException(
+            status_code=400,
+            detail=f"quote_collector_account_disconnected_manual_connect_required: {rec.account_id}",
+        )
+    result = _m()._start_qqq_0dte_quote_collector(owner_id=owner)
+    return {"ok": True, "action": "start", "result": result, "runtime": qqq_0dte_quote_collector_runtime(owner_id=owner)}
+
+
+def qqq_0dte_quote_collector_stop(owner_id: str | None = None) -> dict[str, Any]:
+    owner = _normalize_owner_id(owner_id)
+    result = _m()._stop_qqq_0dte_quote_collector()
+    return {"ok": True, "action": "stop", "result": result, "runtime": qqq_0dte_quote_collector_runtime(owner_id=owner)}
+
+
+def qqq_0dte_quote_collector_store_summary(day: str | None = None, owner_id: str | None = None) -> dict[str, Any]:
+    from api.services.qqq_0dte_quote_store import quote_store_summary
+
+    cfg = qqq_0dte_quote_collector_config_get(owner_id=owner_id)
+    day_key = str(day or "").strip() or datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    return quote_store_summary(str(cfg.get("db_path") or ""), day_et=day_key)
+
+
 def _stock_options_swing_config_path(owner_id: str | None = None) -> str:
     m = _m()
     owner = _normalize_owner_id(owner_id)
@@ -3348,8 +3686,20 @@ def _stock_options_swing_append_ledger(event: dict[str, Any]) -> dict[str, Any]:
 
 def stock_options_swing_refresh_positions_runtime(owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
+    cfg = stock_options_swing_config_get(owner_id=owner_id)
     path = m.STOCK_OPTIONS_SWING_WORKER_RUNTIME_FILE
-    snapshot = {"ok": False, "disabled": True, "reason": "auto_trading_removed"}
+    try:
+        from api import stock_options_swing_worker as sw
+
+        sw._API_BASE_URL = str(cfg.get("api_base_url") or sw._API_BASE_URL).strip().rstrip("/")
+        sw._API_BEARER_TOKEN = sw._resolve_api_bearer(cfg)
+        sw._API_KEY = sw._resolve_api_key(cfg)
+        sw._API_LOCAL_OWNER = str(owner_id or cfg.get("owner_id") or sw._API_LOCAL_OWNER or "").strip().lower()
+        sw._API_ACCOUNT_ID = str(cfg.get("account_id") or sw._API_ACCOUNT_ID or "").strip()
+        sw._API_BROKER_PROVIDER = str(cfg.get("broker_provider") or sw._API_BROKER_PROVIDER or "").strip().lower()
+        snapshot = sw.build_position_management_snapshot(cfg)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "path": path}
 
     existing: dict[str, Any] = {}
     if os.path.isfile(path):
@@ -3908,6 +4258,19 @@ def _order_avg_fill_price(row: Any) -> float:
     )
 
 
+def _order_to_dict(row: Any, fallback_order_id: str | None = None) -> dict[str, Any]:
+    return {
+        "order_id": str(_order_raw_value(row, "order_id", "orderId", "id") or fallback_order_id or ""),
+        "symbol": str(_order_raw_value(row, "symbol") or ""),
+        "side": str(_order_raw_value(row, "side") or ""),
+        "quantity": _order_float_value(row, "quantity", "submitted_quantity", "submittedQuantity"),
+        "price": _order_float_value(row, "price", "submitted_price", "submittedPrice") or None,
+        "status": str(_order_raw_value(row, "status", "order_status", "orderStatus") or ""),
+        "filled_quantity": _order_filled_quantity(row),
+        "avg_fill_price": _order_avg_fill_price(row),
+    }
+
+
 def trade_orders(status: str = "all", account_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
     query = {"status": status}
@@ -3957,6 +4320,24 @@ def trade_orders(status: str = "all", account_id: str | None = None, owner_id: s
             }
         )
     return {"orders": orders}
+
+
+def trade_order_detail(order_id: str, account_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]:
+    oid = str(order_id or "").strip()
+    if not oid:
+        return {}
+    orders = trade_orders(status="all", account_id=account_id, owner_id=owner_id).get("orders")
+    if isinstance(orders, list):
+        for row in orders:
+            if isinstance(row, dict) and str(row.get("order_id") or "").strip() == oid:
+                return dict(row)
+    m = _m()
+
+    def _load() -> dict[str, Any]:
+        _, tctx = m.ensure_contexts(account_id, owner_id=owner_id)
+        return _order_to_dict(m.broker_get_order_detail(tctx, oid), fallback_order_id=oid)
+
+    return _with_trade_context_retry("trade_order_detail", account_id=account_id, owner_id=owner_id, fn=_load)
 
 
 def trade_submit_order(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
@@ -4309,10 +4690,33 @@ def auto_trader_archive_legacy_unscoped_signals(reason: str = "manual") -> dict[
     return result
 
 
+def auto_trader_prune_signals(reason: str = "manual") -> dict[str, Any]:
+    m = _m()
+    result = prune_persisted_signals(reason=reason)
+    try:
+        removed = m.auto_trader.drop_signals(list(result.get("archived_signal_ids") or []))
+    except Exception:
+        removed = 0
+    result["memory_removed_count"] = removed
+    return result
+
+
 def auto_trader_confirm(signal_id: str, body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
     parsed = AutoTraderConfirmBody.model_validate(body if isinstance(body, dict) else {})
     return m.auto_trader_confirm(signal_id=signal_id, body=parsed, owner_id=owner_id)
+
+
+def auto_trader_confirm_preview(signal_id: str, owner_id: str | None = None) -> dict[str, Any]:
+    return _m().auto_trader_confirm_preview(signal_id=signal_id, owner_id=owner_id)
+
+
+def auto_trader_signal_sync(signal_id: str, owner_id: str | None = None) -> dict[str, Any]:
+    return _m().auto_trader_signal_sync(signal_id=signal_id, owner_id=owner_id)
+
+
+def auto_trader_signal_resolve(signal_id: str, body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    return _m().auto_trader_signal_resolve(signal_id=signal_id, body=body, owner_id=owner_id)
 
 
 def auto_trader_metrics_recent(limit: int = 200, event: str | None = None) -> dict[str, Any]:

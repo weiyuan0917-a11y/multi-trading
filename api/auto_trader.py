@@ -45,6 +45,10 @@ def archive_legacy_unscoped_signals(*_args: Any, **_kwargs: Any) -> dict[str, An
     return {"archived_signal_ids": [], "count": 0, "reason": REMOVED_REASON}
 
 
+def prune_persisted_signals(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    return {"removed_signal_ids": [], "count": 0, "reason": REMOVED_REASON}
+
+
 class AutoTraderService:
     def __init__(self, *args: Any, config_path: str | None = None, **kwargs: Any) -> None:
         self.config_path = config_path

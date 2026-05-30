@@ -4,8 +4,11 @@ import json
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -14,7 +17,7 @@ from mcp_server.risk_manager import load_config, save_config
 from runtime_process_utils import is_pid_alive, read_pid_file
 
 from api.auto_trader_research import get_research_status
-from api.auto_trader import archive_legacy_unscoped_signals, summarize_legacy_unscoped_signals
+from api.auto_trader import AutoTraderService, archive_legacy_unscoped_signals, prune_persisted_signals, summarize_legacy_unscoped_signals
 from api.brokers import BrokerCredentials
 from api.schemas_auto_trader import (
     AutoTraderConfirmBody,
@@ -86,8 +89,7 @@ from api.services.public_market_data_service import get_public_market_data_servi
 
 _SETUP_SERVICES_STATUS_CACHE_TTL_SECONDS = 2.0
 _setup_services_status_cache_lock = threading.Lock()
-_setup_services_status_cache_value: dict[str, Any] | None = None
-_setup_services_status_cache_expire_mono = 0.0
+_setup_services_status_cache_by_owner: dict[str, tuple[float, dict[str, Any]]] = {}
 _DASHBOARD_MARKET_CACHE_LOCK = threading.Lock()
 _DASHBOARD_MARKET_CACHE: dict[str, list[dict[str, Any]]] = {"cn_hk": [], "us": []}
 
@@ -106,6 +108,85 @@ def _m():
 def _normalize_broker_provider(value: Any) -> str:
     raw = str(value or "").strip().lower()
     return "longbridge" if raw in {"longport"} else raw
+
+
+def _normalize_owner_id(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    return "".join(ch for ch in raw if ch.isalnum() or ch in {"_", "-"})[:80]
+
+
+def _owner_data_dir(owner_id: str | None, *parts: str) -> str:
+    m = _m()
+    owner = _normalize_owner_id(owner_id)
+    if not owner:
+        return os.path.join(m.ROOT, "data", *parts)
+    return os.path.join(m.ROOT, "data", "owners", owner, *parts)
+
+
+def _read_json_path(path: str) -> dict[str, Any]:
+    try:
+        if not os.path.isfile(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_json_path(path: str, payload: dict[str, Any]) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _stamp_config_owner_context(cfg: dict[str, Any], owner_id: str | None) -> dict[str, Any]:
+    owner = _normalize_owner_id(owner_id)
+    if not owner:
+        return cfg
+    out = dict(cfg)
+    out["owner_id"] = owner
+    try:
+        rec = _m().ACCOUNT_REGISTRY.get_account_record(
+            account_id=(str(out.get("account_id") or "").strip() or None),
+            owner_id=owner,
+        )
+        out["account_id"] = str(getattr(rec, "account_id", "") or "").strip() or out.get("account_id")
+        out["broker_provider"] = str(getattr(rec, "broker_provider", "") or "").strip().lower() or out.get("broker_provider")
+    except Exception:
+        out.setdefault("account_id", None)
+        out.setdefault("broker_provider", None)
+    return out
+
+
+def _legacy_config_matches_owner_context(disk: dict[str, Any] | None, owner_id: str | None) -> bool:
+    owner = _normalize_owner_id(owner_id)
+    if not owner or not isinstance(disk, dict):
+        return False
+    legacy_owner = _normalize_owner_id(disk.get("owner_id"))
+    if legacy_owner:
+        return legacy_owner == owner
+    account_id = str(disk.get("account_id") or "").strip()
+    if not account_id:
+        return False
+    try:
+        rec = _m().ACCOUNT_REGISTRY.get_account_record(account_id=account_id, owner_id=owner)
+    except Exception:
+        return False
+    rec_account = str(getattr(rec, "account_id", "") or "").strip()
+    if rec_account != account_id:
+        return False
+    expected_broker = _normalize_broker_provider(disk.get("broker_provider"))
+    if expected_broker:
+        rec_broker = _normalize_broker_provider(getattr(rec, "broker_provider", ""))
+        if rec_broker and rec_broker != expected_broker:
+            return False
+    return True
 
 
 def _stock_auto_trader_safety_status(owner_id: str | None, config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -272,6 +353,176 @@ def _broker_credentials_from_setup_body(m: Any, parsed: SetupAccountRegisterBody
                 detail="missing_broker_credentials (need private_key, private_key_path, or props_path for tiger)",
             )
         return BrokerCredentials(app_key=tiger_id, app_secret=license_value, access_token=account, extras=extras)
+
+    if provider in {"fosun", "fosunwealth"}:
+        api_key = str(raw_credentials.get("api_key") or raw_credentials.get("fosun_api_key") or parsed.fosun_api_key or "").strip()
+        base_url = str(raw_credentials.get("base_url") or raw_credentials.get("fosun_base_url") or parsed.fosun_base_url or "").strip()
+        sub_account_id = str(
+            raw_credentials.get("sub_account_id")
+            or raw_credentials.get("fosun_sub_account_id")
+            or parsed.fosun_sub_account_id
+            or ""
+        ).strip()
+        server_public_key = str(
+            raw_credentials.get("server_public_key")
+            or raw_credentials.get("fosun_server_public_key")
+            or parsed.fosun_server_public_key
+            or ""
+        ).strip()
+        client_private_key = str(
+            raw_credentials.get("client_private_key")
+            or raw_credentials.get("fosun_client_private_key")
+            or parsed.fosun_client_private_key
+            or ""
+        ).strip()
+        extras = {
+            "base_url": base_url,
+            "sub_account_id": sub_account_id,
+            "client_id": raw_credentials.get("client_id") or raw_credentials.get("fosun_client_id") or parsed.fosun_client_id or "",
+            "server_public_key": server_public_key,
+            "client_private_key": client_private_key,
+            "sdk_type": raw_credentials.get("sdk_type") or raw_credentials.get("fosun_sdk_type") or parsed.fosun_sdk_type or "",
+            "apply_account_id": raw_credentials.get("apply_account_id") or raw_credentials.get("fosun_apply_account_id") or parsed.fosun_apply_account_id or "",
+            "option_apply_account_id": raw_credentials.get("option_apply_account_id")
+            or raw_credentials.get("fosun_option_apply_account_id")
+            or parsed.fosun_option_apply_account_id
+            or "",
+        }
+        extras.update(
+            {
+                str(k): v
+                for k, v in raw_credentials.items()
+                if str(k)
+                not in {
+                    "api_key",
+                    "fosun_api_key",
+                    "base_url",
+                    "fosun_base_url",
+                    "sub_account_id",
+                    "fosun_sub_account_id",
+                    "client_id",
+                    "fosun_client_id",
+                    "server_public_key",
+                    "fosun_server_public_key",
+                    "client_private_key",
+                    "fosun_client_private_key",
+                    "sdk_type",
+                    "fosun_sdk_type",
+                    "apply_account_id",
+                    "fosun_apply_account_id",
+                    "option_apply_account_id",
+                    "fosun_option_apply_account_id",
+                }
+            }
+        )
+        if not api_key or not base_url or not sub_account_id:
+            raise m.HTTPException(
+                status_code=400,
+                detail="missing_broker_credentials (need api_key/base_url/sub_account_id for fosun)",
+            )
+        if not server_public_key or not client_private_key:
+            raise m.HTTPException(
+                status_code=400,
+                detail="missing_broker_credentials (need server_public_key/client_private_key PEM for fosun SDK)",
+            )
+        return BrokerCredentials(app_key=api_key, app_secret="", access_token=sub_account_id, extras=extras)
+
+    if provider == "usmart":
+        trade_host = str(raw_credentials.get("trade_host") or raw_credentials.get("usmart_trade_host") or parsed.usmart_trade_host or "").strip()
+        quote_host = str(raw_credentials.get("quote_host") or raw_credentials.get("usmart_quote_host") or parsed.usmart_quote_host or "").strip()
+        x_channel = str(raw_credentials.get("x_channel") or raw_credentials.get("usmart_x_channel") or parsed.usmart_x_channel or "").strip()
+        phone_number = str(raw_credentials.get("phone_number") or raw_credentials.get("usmart_phone_number") or parsed.usmart_phone_number or "").strip()
+        login_password = str(
+            raw_credentials.get("login_password")
+            or raw_credentials.get("usmart_login_password")
+            or parsed.usmart_login_password
+            or ""
+        ).strip()
+        trade_password = str(
+            raw_credentials.get("trade_password")
+            or raw_credentials.get("usmart_trade_password")
+            or parsed.usmart_trade_password
+            or ""
+        ).strip()
+        server_public_key = str(
+            raw_credentials.get("server_public_key")
+            or raw_credentials.get("usmart_server_public_key")
+            or parsed.usmart_server_public_key
+            or ""
+        ).strip()
+        client_private_key = str(
+            raw_credentials.get("client_private_key")
+            or raw_credentials.get("usmart_client_private_key")
+            or parsed.usmart_client_private_key
+            or ""
+        ).strip()
+        extras = {
+            "trade_host": trade_host,
+            "quote_host": quote_host,
+            "x_lang": raw_credentials.get("x_lang") or raw_credentials.get("usmart_x_lang") or parsed.usmart_x_lang or "1",
+            "x_channel": x_channel,
+            "area_code": raw_credentials.get("area_code") or raw_credentials.get("usmart_area_code") or parsed.usmart_area_code or "86",
+            "phone_number": phone_number,
+            "login_password": login_password,
+            "trade_password": trade_password,
+            "server_public_key": server_public_key,
+            "client_private_key": client_private_key,
+            "timeout_seconds": raw_credentials.get("timeout_seconds")
+            or raw_credentials.get("usmart_timeout_seconds")
+            or parsed.usmart_timeout_seconds
+            or "",
+        }
+        extras.update(
+            {
+                str(k): v
+                for k, v in raw_credentials.items()
+                if str(k)
+                not in {
+                    "trade_host",
+                    "usmart_trade_host",
+                    "quote_host",
+                    "usmart_quote_host",
+                    "x_lang",
+                    "usmart_x_lang",
+                    "x_channel",
+                    "usmart_x_channel",
+                    "area_code",
+                    "usmart_area_code",
+                    "phone_number",
+                    "usmart_phone_number",
+                    "login_password",
+                    "usmart_login_password",
+                    "trade_password",
+                    "usmart_trade_password",
+                    "server_public_key",
+                    "usmart_server_public_key",
+                    "client_private_key",
+                    "usmart_client_private_key",
+                    "timeout_seconds",
+                    "usmart_timeout_seconds",
+                }
+            }
+        )
+        missing = [
+            name
+            for name, value in {
+                "trade_host": trade_host,
+                "quote_host": quote_host,
+                "x_channel": x_channel,
+                "phone_number": phone_number,
+                "login_password": login_password,
+                "trade_password": trade_password,
+                "server_public_key": server_public_key,
+                "client_private_key": client_private_key,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise m.HTTPException(
+                status_code=400,
+                detail=f"missing_broker_credentials (need {','.join(missing)} for usmart)",
+            )
+        return BrokerCredentials(app_key=x_channel, app_secret=login_password, access_token=phone_number, extras=extras)
 
     key = str(
         raw_credentials.get("app_key")
@@ -726,34 +977,65 @@ def setup_risk_config(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "risk_config": cfg.to_dict()}
 
 
-def setup_services_status() -> dict[str, Any]:
-    global _setup_services_status_cache_value, _setup_services_status_cache_expire_mono
+def setup_services_status(owner_id: str | None = None) -> dict[str, Any]:
     now_mono = time.monotonic()
+    cache_key = str(owner_id or "").strip().lower()
     with _setup_services_status_cache_lock:
-        if _setup_services_status_cache_value is not None and now_mono < _setup_services_status_cache_expire_mono:
-            return _setup_services_status_cache_value
+        cached = _setup_services_status_cache_by_owner.get(cache_key)
+        if cached and now_mono < cached[0]:
+            return cached[1]
 
     m = _m()
+    auto_runtime_raw = m._auto_trader_runtime_status()
+    auto_context = _auto_trader_status_context(owner_id)
+    auto_runtime = (
+        auto_runtime_raw
+        if (not auto_context or _runtime_matches_account_context(auto_runtime_raw, auto_context))
+        else _context_mismatch_runtime(auto_runtime_raw, auto_context)
+    )
     try:
         out = build_setup_services_status(
             managed_processes=m._managed_processes,
             feishu_pid_file=m.FEISHU_PID_FILE,
             auto_trader_supervisor_pid_file=m.AUTO_TRADER_SUPERVISOR_PID_FILE,
-            auto_runtime=m._auto_trader_runtime_status(),
+            auto_runtime=auto_runtime,
             qqq_0dte_live_worker_pid_file=m.QQQ_0DTE_LIVE_WORKER_PID_FILE,
-            qqq_0dte_live_runtime=m._qqq_0dte_live_runtime_status(),
+            qqq_0dte_live_runtime=m._qqq_0dte_live_runtime_status(owner_id=owner_id),
             qqq_1dte_live_worker_pid_file=m.QQQ_1DTE_LIVE_WORKER_PID_FILE,
-            qqq_1dte_live_runtime=m._qqq_1dte_live_runtime_status(),
+            qqq_1dte_live_runtime=m._qqq_1dte_live_runtime_status(owner_id=owner_id),
+            stock_options_swing_worker_pid_file=m.STOCK_OPTIONS_SWING_WORKER_PID_FILE,
+            stock_options_swing_runtime=m._stock_options_swing_runtime_status(owner_id=owner_id),
         )
         with _setup_services_status_cache_lock:
-            _setup_services_status_cache_value = out
-            _setup_services_status_cache_expire_mono = time.monotonic() + _SETUP_SERVICES_STATUS_CACHE_TTL_SECONDS
+            _setup_services_status_cache_by_owner[cache_key] = (
+                time.monotonic() + _SETUP_SERVICES_STATUS_CACHE_TTL_SECONDS,
+                out,
+            )
         return out
     except Exception:
         with _setup_services_status_cache_lock:
-            if _setup_services_status_cache_value is not None:
-                return _setup_services_status_cache_value
+            cached = _setup_services_status_cache_by_owner.get(cache_key)
+            if cached:
+                return cached[1]
         raise
+
+
+def setup_public_ip() -> dict[str, Any]:
+    providers = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+    ]
+    errors: list[str] = []
+    for url in providers:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "MultiTrading/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                text = resp.read(128).decode("utf-8", errors="ignore").strip()
+            if text:
+                return {"ok": True, "ip": text, "source": url}
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            errors.append(f"{url}: {e}")
+    return {"ok": False, "ip": "", "source": "", "error": "; ".join(errors[-2:])}
 
 
 def _frontend_dir(m: Any) -> str:
@@ -800,15 +1082,30 @@ def setup_convex_dev_restart() -> dict[str, Any]:
     )
 
 
-def cn_market_data_provider_status() -> dict[str, Any]:
+def _apply_owner_env(owner_id: str | None) -> None:
+    owner = str(owner_id or "").strip()
+    if not owner:
+        return
+    try:
+        from config.user_env_store import apply_light_session_env_for_user
+
+        apply_light_session_env_for_user(owner, Path(_m().ROOT))
+    except Exception:
+        pass
+
+
+def cn_market_data_provider_status(owner_id: str | None = None) -> dict[str, Any]:
+    _apply_owner_env(owner_id)
     return get_cn_market_data_service().provider_status()
 
 
-def public_market_data_provider_status() -> dict[str, Any]:
+def public_market_data_provider_status(owner_id: str | None = None) -> dict[str, Any]:
+    _apply_owner_env(owner_id)
     return get_public_market_data_service().provider_status()
 
 
-def market_data_provider_status() -> dict[str, Any]:
+def market_data_provider_status(owner_id: str | None = None) -> dict[str, Any]:
+    _apply_owner_env(owner_id)
     cn = get_cn_market_data_service().provider_status()
     public = get_public_market_data_service().provider_status()
     out = dict(cn)
@@ -894,6 +1191,18 @@ def setup_install_cn_market_data_provider(body: dict[str, Any]) -> dict[str, Any
             packages.append(pkg)
     if not packages:
         raise m.HTTPException(status_code=400, detail="no_allowed_packages_requested")
+
+    is_customer_build = str(os.getenv("MT_BUILD_TARGET", "")).strip().lower() == "customer"
+    is_frozen_backend = bool(getattr(getattr(m, "sys", None), "frozen", False))
+    if is_customer_build or is_frozen_backend:
+        return {
+            "ok": False,
+            "packages": packages,
+            "installed": [],
+            "error": "runtime_package_install_disabled_customer_build",
+            "hint": "Customer edition is packaged as Backend.exe and does not include a writable Python/pip environment. Bundle these providers at build time, or use built-in public/cache sources.",
+            "provider_status": get_cn_market_data_service().provider_status(),
+        }
 
     installed: list[dict[str, Any]] = []
     try:
@@ -1062,12 +1371,14 @@ def setup_longport_diagnostics(probe: bool = False, owner_id: str | None = None)
 def setup_accounts(owner_id: str) -> dict[str, Any]:
     m = _m()
     items = m.ACCOUNT_REGISTRY.list_accounts(owner_id=owner_id) if hasattr(m, "ACCOUNT_REGISTRY") else []
-    try:
-        default_account_id = (
-            m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id) if hasattr(m, "ACCOUNT_REGISTRY") else None
-        )
-    except Exception:
-        default_account_id = None
+    default_account_id = None
+    if items:
+        try:
+            default_account_id = (
+                m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id) if hasattr(m, "ACCOUNT_REGISTRY") else None
+            )
+        except Exception:
+            default_account_id = None
     return {"ok": True, "default_account_id": default_account_id, "accounts": items}
 
 
@@ -1078,6 +1389,47 @@ def _sync_fee_runtime_after_account_change() -> None:
         fbp.sync_runtime_fee_from_accounts(persist_effective_mirror=False)
     except Exception:
         pass
+
+
+def _clear_setup_services_status_cache(owner_id: str | None = None) -> None:
+    owner = str(owner_id or "").strip().lower()
+    with _setup_services_status_cache_lock:
+        if owner:
+            _setup_services_status_cache_by_owner.pop(owner, None)
+        else:
+            _setup_services_status_cache_by_owner.clear()
+
+
+def _sync_trading_worker_configs_to_account(owner_id: str | None, account_id: str | None) -> list[dict[str, Any]]:
+    owner = _normalize_owner_id(owner_id)
+    aid = str(account_id or "").strip()
+    if not owner or not aid:
+        return []
+
+    m = _m()
+    try:
+        rec = m.ACCOUNT_REGISTRY.get_account_record(account_id=aid, owner_id=owner)
+    except Exception as e:
+        return [{"module": "all", "status": f"error:{e}"}]
+
+    ctx = {
+        "owner_id": owner,
+        "account_id": str(getattr(rec, "account_id", "") or aid).strip() or aid,
+        "broker_provider": _normalize_broker_provider(getattr(rec, "broker_provider", "")),
+    }
+    results: list[dict[str, Any]] = []
+
+    for module, write_one in (
+        ("qqq_0dte", lambda: _write_json_path(_qqq_live_worker_config_path("0dte", owner), {**qqq_0dte_live_worker_config_get(owner_id=owner), **ctx})),
+        ("qqq_1dte", lambda: _write_json_path(_qqq_live_worker_config_path("1dte", owner), {**qqq_1dte_live_worker_config_get(owner_id=owner), **ctx})),
+        ("stock_options_swing", lambda: _write_json_path(_stock_options_swing_config_path(owner), {**stock_options_swing_config_get(owner_id=owner), **ctx})),
+    ):
+        try:
+            write_one()
+            results.append({"module": module, "status": "synced", **ctx})
+        except Exception as e:
+            results.append({"module": module, "status": f"error:{e}", **ctx})
+    return results
 
 
 def setup_account_register(body: dict[str, Any], owner_id: str) -> dict[str, Any]:
@@ -1123,14 +1475,23 @@ def setup_account_connect(account_id: str, owner_id: str) -> dict[str, Any]:
         previous_default_account_id = m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id)
     except Exception:
         previous_default_account_id = None
+    account_switched = bool(previous_default_account_id) and str(previous_default_account_id) != aid
+    pre_connect_stop_results = (
+        _stop_auto_workers_after_account_connect(m, account_switched=True)
+        if account_switched
+        else []
+    )
     try:
         qctx, tctx, rec = m.ACCOUNT_REGISTRY.connect_account(aid, owner_id=owner_id)
     except ValueError as e:
+        _clear_setup_services_status_cache(owner_id)
         raise m.HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        _clear_setup_services_status_cache(owner_id)
         raise m.HTTPException(status_code=400, detail=str(e))
-    account_switched = bool(previous_default_account_id) and str(previous_default_account_id) != aid
-    auto_stop_results = _stop_auto_workers_after_account_connect(m, account_switched=account_switched)
+    post_connect_stop_results = _stop_auto_workers_after_account_connect(m, account_switched=False)
+    auto_stop_results = [*pre_connect_stop_results, *post_connect_stop_results]
+    synced_worker_configs = _sync_trading_worker_configs_to_account(owner_id=owner_id, account_id=rec.account_id)
     try:
         default_account_id = m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id)
     except Exception:
@@ -1150,8 +1511,10 @@ def setup_account_connect(account_id: str, owner_id: str) -> dict[str, Any]:
         "previous_default_account_id": previous_default_account_id,
         "auto_stopped_processes": auto_stop_results,
         "auto_stopped_workers": auto_stop_results,
+        "synced_worker_configs": synced_worker_configs,
     }
     _sync_fee_runtime_after_account_change()
+    _clear_setup_services_status_cache(owner_id)
     return out
 
 
@@ -1178,6 +1541,7 @@ def _stop_auto_workers_after_account_connect(m: Any, *, account_switched: bool) 
         ("auto_trader", getattr(m, "_stop_auto_trader_worker", None)),
         ("qqq_0dte", getattr(m, "_stop_qqq_0dte_live_worker", None)),
         ("qqq_1dte", getattr(m, "_stop_qqq_1dte_live_worker", None)),
+        ("stock_options_swing", getattr(m, "_stop_stock_options_swing_worker", None)),
     ]
     if not account_switched:
         process_stops = [process_stops[0]]
@@ -1226,6 +1590,7 @@ def setup_account_disconnect(account_id: str, owner_id: str) -> dict[str, Any]:
             ("auto_trader", getattr(m, "_stop_auto_trader_worker", None)),
             ("qqq_0dte", getattr(m, "_stop_qqq_0dte_live_worker", None)),
             ("qqq_1dte", getattr(m, "_stop_qqq_1dte_live_worker", None)),
+            ("stock_options_swing", getattr(m, "_stop_stock_options_swing_worker", None)),
         ]
         stop_targets = [(process_name, stop_fn) for process_name, stop_fn in process_stops if callable(stop_fn)]
 
@@ -1262,7 +1627,98 @@ def setup_account_disconnect(account_id: str, owner_id: str) -> dict[str, Any]:
         "auto_stopped_workers": auto_stop_results,
     }
     _sync_fee_runtime_after_account_change()
+    _clear_setup_services_status_cache(owner_id)
     return out
+
+
+def setup_account_delete(account_id: str, owner_id: str) -> dict[str, Any]:
+    m = _m()
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise m.HTTPException(status_code=400, detail="account_id_required")
+    try:
+        deleting_rec = m.ACCOUNT_REGISTRY.get_account_record(aid, owner_id=owner_id)
+    except ValueError as e:
+        raise m.HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise m.HTTPException(status_code=400, detail=str(e))
+
+    was_connected = bool(
+        deleting_rec is not None
+        and not bool(getattr(deleting_rec, "manual_disconnected", False))
+        and str(getattr(deleting_rec, "status", "") or "").strip().lower() != "disconnected"
+    )
+    try:
+        was_default = str(m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id)) == aid
+    except Exception:
+        was_default = False
+
+    try:
+        rec = m.ACCOUNT_REGISTRY.delete_account(aid, owner_id=owner_id)
+    except ValueError as e:
+        raise m.HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise m.HTTPException(status_code=400, detail=str(e))
+
+    try:
+        remaining_accounts = m.ACCOUNT_REGISTRY.list_accounts(owner_id=owner_id)
+    except Exception:
+        remaining_accounts = []
+    try:
+        default_account_id = m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id) if remaining_accounts else None
+    except Exception:
+        default_account_id = None
+
+    auto_stop_results: list[dict[str, Any]] = []
+    all_accounts_disconnected = not bool(m.ACCOUNT_REGISTRY.has_connected_account(owner_id=owner_id))
+    if was_connected and all_accounts_disconnected:
+        process_stops: list[tuple[str, Any]] = [
+            ("auto_trader", getattr(m, "_stop_auto_trader_worker", None)),
+            ("qqq_0dte", getattr(m, "_stop_qqq_0dte_live_worker", None)),
+            ("qqq_1dte", getattr(m, "_stop_qqq_1dte_live_worker", None)),
+            ("stock_options_swing", getattr(m, "_stop_stock_options_swing_worker", None)),
+        ]
+        stop_targets = [(process_name, stop_fn) for process_name, stop_fn in process_stops if callable(stop_fn)]
+        if stop_targets:
+            with ThreadPoolExecutor(max_workers=len(stop_targets)) as pool:
+                futures = {
+                    pool.submit(stop_fn, timeout_seconds=5.0): process_name
+                    for process_name, stop_fn in stop_targets
+                }
+                for fut in as_completed(futures):
+                    process_name = futures[fut]
+                    try:
+                        stop_status = str(fut.result())
+                    except Exception as e:
+                        stop_status = f"error:{e}"
+                    auto_stop_results.append(
+                        {
+                            "process": process_name,
+                            "stop_status": stop_status,
+                            "reason": "account_deleted",
+                        }
+                    )
+
+    if remaining_accounts and owner_id == "__system__" and hasattr(m, "_sync_runtime_state_from_default_account"):
+        try:
+            m._sync_runtime_state_from_default_account()
+        except Exception:
+            pass
+    _sync_fee_runtime_after_account_change()
+    _clear_setup_services_status_cache(owner_id)
+    return {
+        "ok": True,
+        "account_id": aid,
+        "broker_provider": str(getattr(rec, "broker_provider", "") or ""),
+        "deleted": True,
+        "was_default": was_default,
+        "was_connected": was_connected,
+        "default_account_id": default_account_id,
+        "remaining_accounts": remaining_accounts,
+        "all_accounts_disconnected": all_accounts_disconnected,
+        "auto_stopped_processes": auto_stop_results,
+        "auto_stopped_workers": auto_stop_results,
+    }
 
 
 def setup_start_services(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
@@ -1279,30 +1735,51 @@ def setup_start_services(body: dict[str, Any], owner_id: str | None = None) -> d
                 detail=f"{name}_account_disconnected_manual_connect_required: {rec.account_id}",
             )
 
-    needs_auto_trading_account = bool(parsed.enable_auto_trader or parsed.enable_qqq_0dte_live or parsed.enable_qqq_1dte_live)
+    needs_auto_trading_account = bool(
+        parsed.enable_auto_trader
+        or parsed.enable_qqq_0dte_live
+        or parsed.enable_qqq_1dte_live
+        or parsed.enable_stock_options_swing
+    )
     if needs_auto_trading_account:
         if not str(owner_id or "").strip():
             raise m.HTTPException(status_code=401, detail="unauthorized")
+        try:
+            default_account_id = m.ACCOUNT_REGISTRY.get_default_account_id(owner_id=owner_id)
+        except Exception:
+            default_account_id = None
+        if default_account_id:
+            _sync_trading_worker_configs_to_account(owner_id=owner_id, account_id=default_account_id)
+            _clear_setup_services_status_cache(owner_id)
         if bool(parsed.enable_auto_trader):
             _assert_account_connected_for_start("auto_trader", None)
-            _assert_stock_auto_trader_safety(owner_id=owner_id, config=m.auto_trader.get_config())
+            _assert_stock_auto_trader_safety(
+                owner_id=owner_id,
+                config=m._auto_trader_service_for_owner(owner_id).get_config(),
+            )
         if bool(parsed.enable_qqq_0dte_live):
-            cfg0 = qqq_0dte_live_worker_config_get()
+            cfg0 = qqq_0dte_live_worker_config_get(owner_id=owner_id)
             cfg0_account_id = str((cfg0 or {}).get("account_id") or "").strip() or None
             _assert_account_connected_for_start("qqq_0dte", cfg0_account_id)
         if bool(parsed.enable_qqq_1dte_live):
-            cfg1 = qqq_1dte_live_worker_config_get()
+            cfg1 = qqq_1dte_live_worker_config_get(owner_id=owner_id)
             cfg1_account_id = str((cfg1 or {}).get("account_id") or "").strip() or None
             _assert_account_connected_for_start("qqq_1dte", cfg1_account_id)
+        if bool(parsed.enable_stock_options_swing):
+            cfgs = stock_options_swing_config_get(owner_id=owner_id)
+            cfgs_account_id = str((cfgs or {}).get("account_id") or "").strip() or None
+            _assert_account_connected_for_start("stock_options_swing", cfgs_account_id)
     return start_services(
         start_feishu_bot=bool(parsed.start_feishu_bot),
         enable_auto_trader=bool(parsed.enable_auto_trader),
         enable_qqq_0dte_live=bool(parsed.enable_qqq_0dte_live),
         enable_qqq_1dte_live=bool(parsed.enable_qqq_1dte_live),
-        auto_trader=m.auto_trader,
+        enable_stock_options_swing=bool(parsed.enable_stock_options_swing),
+        auto_trader=m._auto_trader_service_for_owner(owner_id),
         start_auto_trader_worker=m._start_auto_trader_worker,
         start_qqq_0dte_live_worker=m._start_qqq_0dte_live_worker,
         start_qqq_1dte_live_worker=m._start_qqq_1dte_live_worker,
+        start_stock_options_swing_worker=m._start_stock_options_swing_worker,
         managed_processes=m._managed_processes,
         root=m.ROOT,
         mcp_dir=m.MCP_DIR,
@@ -1311,25 +1788,36 @@ def setup_start_services(body: dict[str, Any], owner_id: str | None = None) -> d
     )
 
 
-def setup_stop_services(body: dict[str, Any]) -> dict[str, Any]:
+def setup_stop_services(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
     parsed = SetupStopBody.model_validate(body if isinstance(body, dict) else {})
+    requested = {
+        "stocks": bool(parsed.stop_auto_trader),
+        "options-0dte": bool(parsed.stop_qqq_0dte_live),
+        "options-1dte": bool(parsed.stop_qqq_1dte_live),
+        "options-swing": bool(parsed.stop_stock_options_swing),
+    }
+    # Stop is a defensive operation. If a global worker is still alive after an
+    # account switch, allow the current owner to stop it even when the runtime
+    # snapshot belongs to the previous account context.
     return stop_services(
         stop_auto_trader=bool(parsed.stop_auto_trader),
         stop_qqq_0dte_live=bool(parsed.stop_qqq_0dte_live),
         stop_qqq_1dte_live=bool(parsed.stop_qqq_1dte_live),
+        stop_stock_options_swing=bool(parsed.stop_stock_options_swing),
         stop_feishu_bot=bool(parsed.stop_feishu_bot),
-        auto_trader=m.auto_trader,
+        auto_trader=m._auto_trader_service_for_owner(owner_id),
         stop_auto_trader_worker=m._stop_auto_trader_worker,
         stop_qqq_0dte_live_worker=m._stop_qqq_0dte_live_worker,
         stop_qqq_1dte_live_worker=m._stop_qqq_1dte_live_worker,
+        stop_stock_options_swing_worker=m._stop_stock_options_swing_worker,
         stop_feishu_bot_managed_or_pidfile=m._stop_feishu_bot_managed_or_pidfile,
         wait_auto_trader_stopped=m._wait_auto_trader_processes_stopped,
         stop_confirm_timeout_seconds=8.0,
     )
 
 
-def setup_stop_all_services(body: dict[str, Any]) -> dict[str, Any]:
+def setup_stop_all_services(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
     parsed = SetupStopAllBody.model_validate(body if isinstance(body, dict) else {})
     return stop_all_services(
@@ -1339,10 +1827,12 @@ def setup_stop_all_services(body: dict[str, Any]) -> dict[str, Any]:
         stop_auto_trader=bool(parsed.stop_auto_trader),
         stop_qqq_0dte_live=bool(parsed.stop_qqq_0dte_live),
         stop_qqq_1dte_live=bool(parsed.stop_qqq_1dte_live),
-        auto_trader=m.auto_trader,
+        stop_stock_options_swing=bool(parsed.stop_stock_options_swing),
+        auto_trader=m._auto_trader_service_for_owner(owner_id),
         stop_auto_trader_worker=m._stop_auto_trader_worker,
         stop_qqq_0dte_live_worker=m._stop_qqq_0dte_live_worker,
         stop_qqq_1dte_live_worker=m._stop_qqq_1dte_live_worker,
+        stop_stock_options_swing_worker=m._stop_stock_options_swing_worker,
         stop_feishu_bot_managed_or_pidfile=m._stop_feishu_bot_managed_or_pidfile,
         watchdog_pause_file=m.WATCHDOG_PAUSE_FILE,
         watchdog_pid_file=m.WATCHDOG_PID_FILE,
@@ -1373,11 +1863,20 @@ AUTO_TRADING_MODULES: dict[str, dict[str, Any]] = {
     "options-1dte": {
         "id": "options-1dte",
         "kind": "option",
-        "label": "期权 1DTE",
+        "label": "股票期权日内交易",
         "legacy_status_path": "/strategy/qqq-1dte/live-worker-config",
         "legacy_start_flag": "enable_qqq_1dte_live",
         "legacy_stop_flag": "stop_qqq_1dte_live",
         "instance": "1dte",
+    },
+    "options-swing": {
+        "id": "options-swing",
+        "kind": "option",
+        "label": "股票期权中长线交易",
+        "legacy_status_path": "/strategy/stock-options-swing/live-worker-config",
+        "legacy_start_flag": "enable_stock_options_swing",
+        "legacy_stop_flag": "stop_stock_options_swing",
+        "instance": "stock_options_swing",
     },
 }
 
@@ -1396,6 +1895,58 @@ def _runtime_inner(runtime: Any) -> dict[str, Any]:
     return runtime if isinstance(runtime, dict) else {}
 
 
+def _runtime_matches_account_context(runtime: dict[str, Any] | None, context: dict[str, str] | None) -> bool:
+    if not isinstance(runtime, dict):
+        return False
+    ctx = context if isinstance(context, dict) else {}
+    inner = _runtime_inner(runtime)
+    worker = runtime.get("worker") if isinstance(runtime.get("worker"), dict) else {}
+    status = runtime.get("status") if isinstance(runtime.get("status"), dict) else {}
+    for key in ("owner_id", "account_id", "broker_provider"):
+        current = str(ctx.get(key) or "").strip().lower()
+        got = str(
+            runtime.get(key)
+            or inner.get(key)
+            or worker.get(key)
+            or status.get(key)
+            or ""
+        ).strip().lower()
+        if current and (not got or got != current):
+            return False
+    return True
+
+
+def _auto_trader_service(owner_id: str | None = None) -> AutoTraderService:
+    m = _m()
+    factory = getattr(m, "_auto_trader_service_for_owner", None)
+    if callable(factory):
+        return factory(owner_id)
+    return m.auto_trader
+
+
+def _auto_trader_status_context(owner_id: str | None = None) -> dict[str, str]:
+    m = _m()
+    owner = str(owner_id or "").strip().lower()
+    if not owner:
+        return {}
+    try:
+        return m._auto_trader_signal_account_context(owner)
+    except Exception:
+        return {"owner_id": owner}
+
+
+def _context_mismatch_runtime(raw: dict[str, Any] | None, context: dict[str, str]) -> dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "status": "context_mismatch",
+        "context_mismatch": True,
+        "updated_at": raw.get("updated_at"),
+        "worker_running": False,
+        "worker_pid": None,
+        "context": context,
+    }
+
+
 def _auto_trading_l3_status(config: dict[str, Any] | None = None) -> dict[str, Any]:
     max_level = str(os.getenv("OPENCLAW_MCP_MAX_LEVEL", "L2") or "L2").strip().upper()
     allow_l3 = str(os.getenv("OPENCLAW_MCP_ALLOW_L3", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -1411,13 +1962,17 @@ def _auto_trading_l3_status(config: dict[str, Any] | None = None) -> dict[str, A
     }
 
 
-def _auto_trading_option_config(module_id: str) -> dict[str, Any]:
+def _auto_trading_option_config(module_id: str, owner_id: str | None = None) -> dict[str, Any]:
+    if module_id == "options-swing":
+        return stock_options_swing_config_get(owner_id=owner_id)
     meta = _auto_trading_module(module_id)
     inst = str(meta.get("instance") or "")
-    return qqq_live_worker_config_get(inst)
+    return qqq_live_worker_config_get(inst, owner_id=owner_id)
 
 
 def _auto_trading_option_runtime(module_id: str, services: dict[str, Any]) -> dict[str, Any]:
+    if module_id == "options-swing":
+        return services.get("stock_options_swing_runtime") if isinstance(services.get("stock_options_swing_runtime"), dict) else {}
     if module_id == "options-1dte":
         return services.get("qqq_1dte_live_runtime") if isinstance(services.get("qqq_1dte_live_runtime"), dict) else {}
     return services.get("qqq_0dte_live_runtime") if isinstance(services.get("qqq_0dte_live_runtime"), dict) else {}
@@ -1426,6 +1981,8 @@ def _auto_trading_option_runtime(module_id: str, services: dict[str, Any]) -> di
 def _auto_trading_module_running(module_id: str, services: dict[str, Any]) -> bool:
     if module_id == "stocks":
         return bool(services.get("auto_trader_scheduler_running") or services.get("auto_trader_supervisor_running"))
+    if module_id == "options-swing":
+        return bool(services.get("stock_options_swing_running"))
     if module_id == "options-1dte":
         return bool(services.get("qqq_1dte_live_running"))
     return bool(services.get("qqq_0dte_live_running"))
@@ -1436,6 +1993,7 @@ def _auto_trading_module_pid(module_id: str, services: dict[str, Any]) -> int | 
         "stocks": "auto_trader_worker_pid",
         "options-0dte": "qqq_0dte_live_pid",
         "options-1dte": "qqq_1dte_live_pid",
+        "options-swing": "stock_options_swing_pid",
     }.get(module_id)
     raw = services.get(key or "")
     try:
@@ -1444,9 +2002,13 @@ def _auto_trading_module_pid(module_id: str, services: dict[str, Any]) -> int | 
         return None
 
 
-def _auto_trading_module_status_from_services(module_id: str, services: dict[str, Any] | None = None) -> dict[str, Any]:
+def _auto_trading_module_status_from_services(
+    module_id: str,
+    services: dict[str, Any] | None = None,
+    owner_id: str | None = None,
+) -> dict[str, Any]:
     meta = _auto_trading_module(module_id)
-    services = services if isinstance(services, dict) else setup_services_status()
+    services = services if isinstance(services, dict) else setup_services_status(owner_id=owner_id)
     running = _auto_trading_module_running(module_id, services)
     runtime = services.get("auto_trader_runtime") if module_id == "stocks" else _auto_trading_option_runtime(module_id, services)
     runtime = runtime if isinstance(runtime, dict) else {}
@@ -1454,7 +2016,7 @@ def _auto_trading_module_status_from_services(module_id: str, services: dict[str
     status_extra: dict[str, Any] = {}
     if module_id == "stocks":
         try:
-            st = auto_trader_status()
+            st = auto_trader_status(owner_id=owner_id)
             cfg = st.get("config") if isinstance(st.get("config"), dict) else {}
             status_extra = {
                 "daily_trade_count": st.get("daily_trade_count"),
@@ -1466,7 +2028,7 @@ def _auto_trading_module_status_from_services(module_id: str, services: dict[str
         except Exception:
             cfg = {}
     else:
-        cfg = _auto_trading_option_config(module_id)
+            cfg = _auto_trading_option_config(module_id, owner_id=owner_id)
     inner = _runtime_inner(runtime)
     return {
         "id": meta["id"],
@@ -1486,9 +2048,9 @@ def auto_trading_modules() -> dict[str, Any]:
     return {"ok": True, "items": [dict(v) for v in AUTO_TRADING_MODULES.values()]}
 
 
-def auto_trading_status() -> dict[str, Any]:
-    services = setup_services_status()
-    modules = [_auto_trading_module_status_from_services(mid, services) for mid in AUTO_TRADING_MODULES]
+def auto_trading_status(owner_id: str | None = None) -> dict[str, Any]:
+    services = setup_services_status(owner_id=owner_id)
+    modules = [_auto_trading_module_status_from_services(mid, services, owner_id=owner_id) for mid in AUTO_TRADING_MODULES]
     return {
         "ok": True,
         "modules": modules,
@@ -1498,13 +2060,22 @@ def auto_trading_status() -> dict[str, Any]:
     }
 
 
-def auto_trading_module_status(module_id: str) -> dict[str, Any]:
-    return {"ok": True, "module": _auto_trading_module_status_from_services(_auto_trading_module(module_id)["id"])}
+def auto_trading_module_status(module_id: str, owner_id: str | None = None) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "module": _auto_trading_module_status_from_services(_auto_trading_module(module_id)["id"], owner_id=owner_id),
+    }
 
 
 def _auto_trading_setup_start_body(module_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     meta = _auto_trading_module(module_id)
-    out = {"start_feishu_bot": False, "enable_auto_trader": False, "enable_qqq_0dte_live": False, "enable_qqq_1dte_live": False}
+    out = {
+        "start_feishu_bot": False,
+        "enable_auto_trader": False,
+        "enable_qqq_0dte_live": False,
+        "enable_qqq_1dte_live": False,
+        "enable_stock_options_swing": False,
+    }
     out[str(meta["legacy_start_flag"])] = True
     if isinstance(body, dict) and "start_feishu_bot" in body:
         out["start_feishu_bot"] = bool(body.get("start_feishu_bot"))
@@ -1513,7 +2084,13 @@ def _auto_trading_setup_start_body(module_id: str, body: dict[str, Any] | None =
 
 def _auto_trading_setup_stop_body(module_id: str) -> dict[str, Any]:
     meta = _auto_trading_module(module_id)
-    out = {"stop_feishu_bot": False, "stop_auto_trader": False, "stop_qqq_0dte_live": False, "stop_qqq_1dte_live": False}
+    out = {
+        "stop_feishu_bot": False,
+        "stop_auto_trader": False,
+        "stop_qqq_0dte_live": False,
+        "stop_qqq_1dte_live": False,
+        "stop_stock_options_swing": False,
+    }
     out[str(meta["legacy_stop_flag"])] = True
     return out
 
@@ -1521,18 +2098,30 @@ def _auto_trading_setup_stop_body(module_id: str) -> dict[str, Any]:
 def auto_trading_module_start(module_id: str, body: dict[str, Any] | None = None, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
     result = setup_start_services(_auto_trading_setup_start_body(mid, body), owner_id=owner_id)
-    return {"ok": True, "module_id": mid, "action": "start", "result": result, "module": _auto_trading_module_status_from_services(mid)}
+    return {
+        "ok": True,
+        "module_id": mid,
+        "action": "start",
+        "result": result,
+        "module": _auto_trading_module_status_from_services(mid, owner_id=owner_id),
+    }
 
 
-def auto_trading_module_stop(module_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+def auto_trading_module_stop(module_id: str, body: dict[str, Any] | None = None, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
-    result = setup_stop_services(_auto_trading_setup_stop_body(mid))
-    return {"ok": True, "module_id": mid, "action": "stop", "result": result, "module": _auto_trading_module_status_from_services(mid)}
+    result = setup_stop_services(_auto_trading_setup_stop_body(mid), owner_id=owner_id)
+    return {
+        "ok": True,
+        "module_id": mid,
+        "action": "stop",
+        "result": result,
+        "module": _auto_trading_module_status_from_services(mid, owner_id=owner_id),
+    }
 
 
 def auto_trading_module_restart(module_id: str, body: dict[str, Any] | None = None, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
-    stopped = setup_stop_services(_auto_trading_setup_stop_body(mid))
+    stopped = setup_stop_services(_auto_trading_setup_stop_body(mid), owner_id=owner_id)
     started = setup_start_services(_auto_trading_setup_start_body(mid, body), owner_id=owner_id)
     return {
         "ok": True,
@@ -1540,14 +2129,14 @@ def auto_trading_module_restart(module_id: str, body: dict[str, Any] | None = No
         "action": "restart",
         "stopped": stopped,
         "started": started,
-        "module": _auto_trading_module_status_from_services(mid),
+        "module": _auto_trading_module_status_from_services(mid, owner_id=owner_id),
     }
 
 
-def auto_trading_module_risk_summary(module_id: str) -> dict[str, Any]:
+def auto_trading_module_risk_summary(module_id: str, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
     if mid == "stocks":
-        st = auto_trader_status()
+        st = auto_trader_status(owner_id=owner_id)
         cfg = st.get("config") if isinstance(st.get("config"), dict) else {}
         summary = {
             "auto_execute": bool(cfg.get("auto_execute")),
@@ -1562,24 +2151,46 @@ def auto_trading_module_risk_summary(module_id: str) -> dict[str, Any]:
             "consecutive_loss_stop_triggered": bool(st.get("consecutive_loss_stop_triggered")),
         }
     else:
-        cfg = _auto_trading_option_config(mid)
-        strat = cfg.get("strategy_config") if isinstance(cfg.get("strategy_config"), dict) else {}
-        runtime = _runtime_inner(_auto_trading_option_runtime(mid, setup_services_status()))
-        summary = {
-            "dry_run": bool(cfg.get("dry_run")),
-            "symbol": cfg.get("symbol"),
-            "account_id": cfg.get("account_id"),
-            "poll_seconds": cfg.get("poll_seconds"),
-            "trade_bar_freshness_seconds": cfg.get("trade_bar_freshness_seconds"),
-            "expiry_offset_days": cfg.get("expiry_offset_days"),
-            "strategy_config": strat,
-            "last_position": runtime.get("position") or runtime.get("open_position"),
-            "last_decision": runtime.get("decision") or runtime.get("last_decision"),
-        }
+        cfg = _auto_trading_option_config(mid, owner_id=owner_id)
+        runtime = _runtime_inner(_auto_trading_option_runtime(mid, setup_services_status(owner_id=owner_id)))
+        if mid == "options-swing":
+            strat = cfg.get("strategy") if isinstance(cfg.get("strategy"), dict) else {}
+            summary = {
+                "dry_run": bool(cfg.get("dry_run")),
+                "auto_submit_orders": bool(cfg.get("auto_submit_orders")),
+                "managed_positions_only": bool(cfg.get("managed_positions_only")),
+                "skip_existing_broker_positions": bool(cfg.get("skip_existing_broker_positions")),
+                "stock_pool": cfg.get("stock_pool") if isinstance(cfg.get("stock_pool"), list) else [],
+                "account_id": cfg.get("account_id"),
+                "poll_seconds": cfg.get("poll_seconds"),
+                "history_days": cfg.get("history_days"),
+                "kline": cfg.get("kline"),
+                "strategy": strat,
+                "candidate_count": runtime.get("candidate_count"),
+                "managed_positions": runtime.get("managed_positions"),
+                "unmanaged_positions": runtime.get("unmanaged_positions"),
+                "warnings": runtime.get("warnings"),
+                "scheduler": runtime.get("scheduler"),
+            }
+        else:
+            strat = cfg.get("strategy_config") if isinstance(cfg.get("strategy_config"), dict) else {}
+            summary = {
+                "dry_run": bool(cfg.get("dry_run")),
+                "symbol": cfg.get("symbol"),
+                "stock_options_mode": bool(cfg.get("stock_options_mode")),
+                "stock_pool": cfg.get("stock_pool") if isinstance(cfg.get("stock_pool"), list) else [],
+                "account_id": cfg.get("account_id"),
+                "poll_seconds": cfg.get("poll_seconds"),
+                "trade_bar_freshness_seconds": cfg.get("trade_bar_freshness_seconds"),
+                "expiry_offset_days": cfg.get("expiry_offset_days"),
+                "strategy_config": strat,
+                "last_position": runtime.get("position") or runtime.get("open_position"),
+                "last_decision": runtime.get("decision") or runtime.get("last_decision"),
+            }
     return {"ok": True, "module_id": mid, "risk": summary, "l3": _auto_trading_l3_status(cfg if isinstance(cfg, dict) else {})}
 
 
-def auto_trading_module_events(module_id: str, limit: int = 50) -> dict[str, Any]:
+def auto_trading_module_events(module_id: str, limit: int = 50, owner_id: str | None = None) -> dict[str, Any]:
     mid = _auto_trading_module(module_id)["id"]
     lim = max(1, min(200, int(limit)))
     if mid == "stocks":
@@ -1588,11 +2199,14 @@ def auto_trading_module_events(module_id: str, limit: int = 50) -> dict[str, Any
         if not isinstance(items, list):
             items = []
         return {"ok": True, "module_id": mid, "items": items[:lim], "source": "/auto-trader/metrics/recent"}
-    if mid == "options-1dte":
-        tail = qqq_1dte_live_worker_decision_tail_get(limit=lim)
+    if mid == "options-swing":
+        tail = stock_options_swing_decision_tail_get(limit=lim, owner_id=owner_id)
+        source = "/strategy/stock-options-swing/live-worker-decision-tail"
+    elif mid == "options-1dte":
+        tail = qqq_1dte_live_worker_decision_tail_get(limit=lim, owner_id=owner_id)
         source = "/strategy/qqq-1dte/live-worker-decision-tail"
     else:
-        tail = qqq_0dte_live_worker_decision_tail_get(limit=lim)
+        tail = qqq_0dte_live_worker_decision_tail_get(limit=lim, owner_id=owner_id)
         source = "/strategy/qqq-0dte/live-worker-decision-tail"
     items = tail.get("items") if isinstance(tail.get("items"), list) else []
     return {"ok": bool(tail.get("ok", True)), "module_id": mid, "items": items, "source": source, "path": tail.get("path")}
@@ -1606,14 +2220,18 @@ def auto_trading_module_confirm(module_id: str, body: dict[str, Any]) -> dict[st
         signal_id = str(payload.get("signal_id") or "").strip()
         if not signal_id:
             raise _m().HTTPException(status_code=400, detail={"error": "signal_id_required"})
-        return {"ok": True, "module_id": mid, "result": auto_trader_confirm(signal_id, {"confirmation_token": token})}
+        return {
+            "ok": True,
+            "module_id": mid,
+            "result": auto_trader_confirm(signal_id, {"confirmation_token": token}, owner_id=payload.get("owner_id")),
+        }
     _m()._ensure_l3_confirmation(token)
     return {
         "ok": True,
         "module_id": mid,
         "confirmed": True,
         "message": "L3 confirmation accepted for this module. Option live orders continue to use the module worker config token.",
-        "l3": _auto_trading_l3_status(_auto_trading_option_config(mid)),
+        "l3": _auto_trading_l3_status(_auto_trading_option_config(mid, owner_id=payload.get("owner_id"))),
     }
 
 
@@ -2002,33 +2620,67 @@ def backtest_kline_cache_fetch(body: dict[str, Any]) -> dict[str, Any]:
         bars0, meta0 = m._read_server_kline_cache_file(path)
         if bars0 and (periods <= 0 or len(bars0) >= periods):
             use = bars0[-periods:] if periods > 0 and len(bars0) > periods else bars0
-            return {
-                "ok": True,
-                "cached": True,
-                "symbol": sym,
-                "kline": str(kline),
-                "periods": periods,
-                "days": days,
-                "bar_count": len(use),
-                "cache_path": path,
-                "source": source,
-                "meta": meta0,
-            }
-    if source not in {"auto", "longbridge", "longport"}:
+            incomplete = (
+                m._server_kline_calendar_cache_incomplete(sym, kline, days, use)
+                if periods <= 0 and hasattr(m, "_server_kline_calendar_cache_incomplete")
+                else None
+            )
+            if not incomplete:
+                return {
+                    "ok": True,
+                    "cached": True,
+                    "symbol": sym,
+                    "kline": str(kline),
+                    "periods": periods,
+                    "days": days,
+                    "bar_count": len(use),
+                    "cache_path": path,
+                    "source": source,
+                    "meta": meta0,
+                }
+            meta0 = dict(meta0 or {})
+            meta0["auto_repair_reason"] = incomplete
+            force_refresh_due_to_incomplete = True
+        else:
+            force_refresh_due_to_incomplete = False
+    else:
+        force_refresh_due_to_incomplete = False
+    if force_refresh_due_to_incomplete and source in {"auto", "longbridge", "longport"} and periods <= 0:
+        bars = m._fetch_bars_calendar_days(sym, days, kline, _skip_gateway=True)
+        repaired_from = "auto_repair_incomplete_cache"
+    elif source not in {"auto", "longbridge", "longport"}:
         fetch_days = days if periods <= 0 else max(days, periods * 2)
         bars = m._fetch_public_market_bars(sym, fetch_days, kline, limit=periods, source=source)
         bars = bars[-periods:] if periods > 0 and len(bars) > periods else bars
+        repaired_from = ""
     elif periods > 0:
         bars = m._fetch_bars_by_periods(sym, periods, kline)
         bars = bars[-periods:] if len(bars) > periods else bars
+        repaired_from = ""
     else:
         bars = m._fetch_bars_calendar_days(sym, days, kline)
+        repaired_from = ""
     if not bars:
         raise m.HTTPException(status_code=400, detail="无法获取历史数据")
+    incomplete = (
+        m._server_kline_calendar_cache_incomplete(sym, kline, days, bars)
+        if periods <= 0 and hasattr(m, "_server_kline_calendar_cache_incomplete")
+        else None
+    )
+    if incomplete:
+        raise m.HTTPException(
+            status_code=409,
+            detail={
+                "error": "kline_server_cache_incomplete",
+                "message": "K线下载结果不完整，已拒绝覆盖现有缓存；请改用较短窗口或保留安装包内置缓存。",
+                **incomplete,
+            },
+        )
     m._write_server_kline_cache_file(path, symbol=sym, kline=str(kline), periods=periods, days=days, bars=bars)
     return {
         "ok": True,
         "cached": False,
+        "repaired": bool(repaired_from),
         "symbol": sym,
         "kline": str(kline),
         "periods": periods,
@@ -2036,7 +2688,7 @@ def backtest_kline_cache_fetch(body: dict[str, Any]) -> dict[str, Any]:
         "bar_count": len(bars),
         "cache_path": path,
         "source": source,
-        "meta": {"saved_at": m.datetime.now(m.timezone.utc).isoformat(), "bar_count": len(bars), "source": source},
+        "meta": {"saved_at": m.datetime.now(m.timezone.utc).isoformat(), "bar_count": len(bars), "source": source, "repair": repaired_from},
     }
 
 
@@ -2537,6 +3189,8 @@ def qqq_live_worker_default_config(instance: str = "0dte") -> dict[str, Any]:
         "api_base_url": "http://127.0.0.1:8010",
         "account_id": None,
         "symbol": "QQQ.US",
+        "stock_options_mode": bool(instance == "1dte"),
+        "stock_pool": ["QQQ.US"] if instance == "1dte" else [],
         "history_days": 2,
         "kline": "1m",
         "poll_seconds": 30,
@@ -2551,6 +3205,23 @@ def qqq_live_worker_default_config(instance: str = "0dte") -> dict[str, Any]:
         "resolve": {"strike_window": 5.0, "standard_only": False, "max_strike_diff": 1.5},
         "strategy_config": {},
     }
+    if instance == "1dte":
+        out["intraday_safety"] = {
+            "enabled": True,
+            "max_bid_ask_spread_pct": 0.18,
+            "min_bid": 0.01,
+            "min_ask": 0.01,
+            "min_mid": 0.03,
+            "min_volume": 0,
+            "min_open_interest": 0,
+            "require_bid": True,
+            "latest_entry_hhmm_et": "15:00",
+            "block_entry_when_unmanaged_positions": True,
+            "block_market_order": True,
+            "post_entry_check_delay_seconds": 1.0,
+            "cancel_open_entry_orders_after_submit": True,
+            "cancel_active_orders_at_force_close": True,
+        }
     return out
 
 
@@ -2558,11 +3229,27 @@ def qqq_0dte_live_worker_default_config() -> dict[str, Any]:
     return qqq_live_worker_default_config("0dte")
 
 
-def qqq_live_worker_config_get(instance: str) -> dict[str, Any]:
+def _qqq_live_worker_config_path(instance: str, owner_id: str | None = None) -> str:
     m = _m()
     sub = _qqq_live_worker_data_subdir(instance)
-    path = os.path.join(m.ROOT, "data", sub, "live_worker_config.json")
+    owner = _normalize_owner_id(owner_id)
+    if owner:
+        return _owner_data_dir(owner, sub, "live_worker_config.json")
+    return os.path.join(m.ROOT, "data", sub, "live_worker_config.json")
+
+
+def qqq_live_worker_config_get(instance: str, owner_id: str | None = None) -> dict[str, Any]:
+    sub = _qqq_live_worker_data_subdir(instance)
+    path = _qqq_live_worker_config_path(instance, owner_id)
+    legacy_path = os.path.join(_m().ROOT, "data", sub, "live_worker_config.json")
     base = qqq_live_worker_default_config(instance)
+    if _normalize_owner_id(owner_id):
+        base = _stamp_config_owner_context(base, owner_id)
+    if _normalize_owner_id(owner_id) and not os.path.isfile(path) and os.path.isfile(legacy_path):
+        disk = _read_json_path(legacy_path)
+        if _legacy_config_matches_owner_context(disk, owner_id):
+            disk = _stamp_config_owner_context(disk, owner_id)
+            _write_json_path(path, disk)
     if not os.path.isfile(path):
         return dict(base)
     try:
@@ -2580,24 +3267,22 @@ def qqq_live_worker_config_get(instance: str) -> dict[str, Any]:
             merged["strategy_config"] = disk["strategy_config"]
         else:
             merged["strategy_config"] = {}
-        return merged
+        return _stamp_config_owner_context(merged, owner_id) if _normalize_owner_id(owner_id) else merged
     except Exception:
         return dict(base)
 
 
-def qqq_0dte_live_worker_config_get() -> dict[str, Any]:
-    return qqq_live_worker_config_get("0dte")
+def qqq_0dte_live_worker_config_get(owner_id: str | None = None) -> dict[str, Any]:
+    return qqq_live_worker_config_get("0dte", owner_id=owner_id)
 
 
-def qqq_1dte_live_worker_config_get() -> dict[str, Any]:
-    return qqq_live_worker_config_get("1dte")
+def qqq_1dte_live_worker_config_get(owner_id: str | None = None) -> dict[str, Any]:
+    return qqq_live_worker_config_get("1dte", owner_id=owner_id)
 
 
-def qqq_live_worker_config_put(instance: str, body: dict[str, Any]) -> dict[str, Any]:
-    m = _m()
-    sub = _qqq_live_worker_data_subdir(instance)
-    path = os.path.join(m.ROOT, "data", sub, "live_worker_config.json")
-    cur = qqq_live_worker_config_get(instance)
+def qqq_live_worker_config_put(instance: str, body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    path = _qqq_live_worker_config_path(instance, owner_id)
+    cur = qqq_live_worker_config_get(instance, owner_id=owner_id)
     if not isinstance(body, dict):
         body = {}
     for k, v in body.items():
@@ -2610,6 +3295,12 @@ def qqq_live_worker_config_put(instance: str, body: dict[str, Any]) -> dict[str,
                 r = dict(cur.get("resolve") or {})
                 r.update(v)
                 cur["resolve"] = r
+            continue
+        if k == "intraday_safety":
+            if isinstance(v, dict):
+                r = dict(cur.get("intraday_safety") or {})
+                r.update(v)
+                cur["intraday_safety"] = r
             continue
         if k == "expiry_offset_days":
             try:
@@ -2625,33 +3316,537 @@ def qqq_live_worker_config_put(instance: str, body: dict[str, Any]) -> dict[str,
         cur["strategy_config"] = {}
     if not isinstance(cur.get("resolve"), dict):
         cur["resolve"] = dict(qqq_live_worker_default_config(instance)["resolve"])
+    if instance == "1dte" and not isinstance(cur.get("intraday_safety"), dict):
+        cur["intraday_safety"] = dict(qqq_live_worker_default_config(instance).get("intraday_safety") or {})
+    cur = _stamp_config_owner_context(cur, owner_id) if _normalize_owner_id(owner_id) else cur
+    _write_json_path(path, cur)
+    return {"ok": True, "config": cur}
+
+
+def qqq_0dte_live_worker_config_put(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    return qqq_live_worker_config_put("0dte", body if isinstance(body, dict) else {}, owner_id=owner_id)
+
+
+def qqq_1dte_live_worker_config_put(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    return qqq_live_worker_config_put("1dte", body if isinstance(body, dict) else {}, owner_id=owner_id)
+
+
+def qqq_live_worker_manual_review_lock_clear(
+    instance: str,
+    body: dict[str, Any] | None = None,
+    owner_id: str | None = None,
+) -> dict[str, Any]:
+    m = _m()
+    sub = _qqq_live_worker_data_subdir(instance)
+    path = os.path.join(m.ROOT, "data", sub, "live_worker_manual_review_lock.json")
+    context: dict[str, str] = {}
+    if str(owner_id or "").strip():
+        try:
+            context = m._qqq_live_status_account_context(instance, owner_id)
+        except Exception:
+            context = {"owner_id": str(owner_id or "").strip().lower()}
+    previous: dict[str, Any] | None = None
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            previous = loaded if isinstance(loaded, dict) else None
+        except Exception:
+            previous = None
+    cleared = False
+    if previous and context:
+        try:
+            matches_context = bool(m._manual_review_lock_matches_context(previous, context))
+        except Exception:
+            matches_context = False
+        if not matches_context:
+            return {
+                "ok": False,
+                "cleared": False,
+                "error": "manual_review_lock_context_mismatch",
+                "previous": previous,
+                "context": context,
+                "path": path,
+            }
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            cleared = True
+    except Exception as e:
+        raise _m().HTTPException(status_code=500, detail={"error": "manual_review_lock_clear_failed", "message": str(e)})
+    note = ""
+    if isinstance(body, dict):
+        note = str(body.get("note") or "").strip()
+    return {
+        "ok": True,
+        "cleared": cleared,
+        "previous": previous,
+        "context": context or None,
+        "note": note or None,
+        "cleared_at": datetime.now(timezone.utc).isoformat(),
+        "path": path,
+    }
+
+
+def qqq_0dte_live_worker_manual_review_lock_clear(
+    body: dict[str, Any] | None = None,
+    owner_id: str | None = None,
+) -> dict[str, Any]:
+    return qqq_live_worker_manual_review_lock_clear("0dte", body, owner_id=owner_id)
+
+
+def qqq_1dte_live_worker_manual_review_lock_clear(
+    body: dict[str, Any] | None = None,
+    owner_id: str | None = None,
+) -> dict[str, Any]:
+    return qqq_live_worker_manual_review_lock_clear("1dte", body, owner_id=owner_id)
+
+
+def stock_options_swing_default_config() -> dict[str, Any]:
+    return {
+        "api_base_url": "http://127.0.0.1:8010",
+        "account_id": None,
+        "symbol": "QQQ.US",
+        "stock_pool": ["QQQ.US", "NVDA.US", "AAPL.US", "MSFT.US", "TSLA.US"],
+        "history_days": 260,
+        "kline": "1d",
+        "poll_seconds": 3600,
+        "scan_time_hhmm_et": "10:00",
+        "second_scan_time_hhmm_et": "15:30",
+        "dry_run": True,
+        "auto_submit_orders": False,
+        "live_submit_confirmed_at": None,
+        "live_submit_confirmed_by": None,
+        "confirmation_token": None,
+        "contracts": 1,
+        "strategy": {
+            "strategy_variant": "swing_trend_call",
+            "mode": "long_call",
+            "trend_fast_ma": 20,
+            "trend_slow_ma": 50,
+            "long_ma": 200,
+            "min_trend_score": 3,
+            "min_price_above_slow_ma_pct": 0.0,
+            "max_price_above_fast_ma_pct": 0.12,
+            "min_dte": 45,
+            "target_dte": 90,
+            "max_dte": 180,
+            "target_delta_min": 0.35,
+            "target_delta_max": 0.7,
+            "fallback_otm_pct": 0.03,
+            "spread_width_pct": 0.05,
+            "max_spread_debit": 600.0,
+            "min_open_interest": 50,
+            "min_option_volume": 1,
+            "max_bid_ask_spread_pct": 0.18,
+            "take_profit_pct": 0.8,
+            "stop_loss_pct": 0.45,
+            "dte_exit_days": 21,
+            "earnings_blackout_days": 7,
+            "trend_exit_below_ma": 50,
+            "trend_exit_confirm_bars": 2,
+        },
+        "managed_positions_only": True,
+        "strict_account_ledger_match": True,
+        "allow_import_existing_positions": False,
+        "skip_existing_broker_positions": True,
+        "symbol_blacklist": [],
+        "event_blackouts": [],
+        "risk": {
+            "max_contracts_per_order": 1,
+            "max_open_contracts": 10,
+            "max_premium_per_order": 800.0,
+            "max_premium_per_symbol": 1500.0,
+            "max_total_option_premium": 4000.0,
+            "max_new_premium_per_day": 1500.0,
+        },
+    }
+
+
+def qqq_0dte_quote_collector_default_config() -> dict[str, Any]:
+    from api.services.qqq_0dte_quote_store import DEFAULT_DB_PATH
+
+    return {
+        "enabled": True,
+        "underlying": "QQQ.US",
+        "strike_window": 15,
+        "poll_seconds": 60,
+        "chain_refresh_seconds": 300,
+        "collect_start_hhmm_et": "09:25",
+        "collect_end_hhmm_et": "16:05",
+        "include_calls": True,
+        "include_puts": True,
+        "standard_only": False,
+        "fallback_depth": True,
+        "depth_fallback_max_symbols_per_poll": 80,
+        "db_path": DEFAULT_DB_PATH,
+        "account_id": None,
+        "broker_provider": None,
+    }
+
+
+def qqq_0dte_quote_collector_config_path(owner_id: str | None = None) -> str:
+    m = _m()
+    owner = _normalize_owner_id(owner_id)
+    if owner:
+        return _owner_data_dir(owner, "qqq_0dte_quote_collector", "collector_config.json")
+    return os.path.join(m.ROOT, "data", "qqq_0dte_quote_collector", "collector_config.json")
+
+
+def qqq_0dte_quote_collector_config_get(owner_id: str | None = None) -> dict[str, Any]:
+    path = qqq_0dte_quote_collector_config_path(owner_id)
+    legacy_path = os.path.join(_m().ROOT, "data", "qqq_0dte_quote_collector", "collector_config.json")
+    base = qqq_0dte_quote_collector_default_config()
+    data = _read_json_path(path)
+    if not data and path != legacy_path:
+        data = _read_json_path(legacy_path)
+    out = {**base, **(data if isinstance(data, dict) else {})}
+    owner = _normalize_owner_id(owner_id)
+    if owner:
+        out["owner_id"] = owner
+    return out
+
+
+def qqq_0dte_quote_collector_config_put(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    cur = qqq_0dte_quote_collector_config_get(owner_id=owner_id)
+    patch = dict(body if isinstance(body, dict) else {})
+    allowed = set(qqq_0dte_quote_collector_default_config()) | {"owner_id"}
+    for key in list(patch):
+        if key not in allowed:
+            patch.pop(key, None)
+    next_cfg = {**cur, **patch}
+    next_cfg["underlying"] = str(next_cfg.get("underlying") or "QQQ.US").strip().upper()
+    if "." not in next_cfg["underlying"]:
+        next_cfg["underlying"] += ".US"
+    next_cfg["strike_window"] = max(1, min(100, int(next_cfg.get("strike_window") or 15)))
+    next_cfg["poll_seconds"] = max(5, min(3600, int(next_cfg.get("poll_seconds") or 60)))
+    next_cfg["depth_fallback_max_symbols_per_poll"] = max(
+        0,
+        min(500, int(next_cfg.get("depth_fallback_max_symbols_per_poll") or 0)),
+    )
+    owner = _normalize_owner_id(owner_id)
+    if owner:
+        next_cfg["owner_id"] = owner
+    path = qqq_0dte_quote_collector_config_path(owner_id)
+    _write_json_path(path, next_cfg)
+    return {"ok": True, "path": path, "config": next_cfg}
+
+
+def qqq_0dte_quote_collector_runtime(owner_id: str | None = None) -> dict[str, Any]:
+    m = _m()
+    rt = m._qqq_0dte_quote_collector_runtime_status(owner_id=owner_id)
+    cfg = qqq_0dte_quote_collector_config_get(owner_id=owner_id)
+    from api.services.qqq_0dte_quote_store import quote_store_summary
+
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    return {
+        "ok": True,
+        "config": cfg,
+        "runtime": rt,
+        "store": quote_store_summary(str(cfg.get("db_path") or ""), day_et=today),
+    }
+
+
+def qqq_0dte_quote_collector_start(owner_id: str | None = None) -> dict[str, Any]:
+    owner = _normalize_owner_id(owner_id)
+    if not owner:
+        raise _m().HTTPException(status_code=401, detail="unauthorized")
+    cfg = qqq_0dte_quote_collector_config_get(owner_id=owner)
+    account_id = str((cfg or {}).get("account_id") or "").strip() or None
+    try:
+        rec = _m().ACCOUNT_REGISTRY.get_account_record(account_id=account_id, owner_id=owner)
+    except ValueError as e:
+        raise _m().HTTPException(status_code=400, detail=f"quote_collector_account_not_ready: {e}")
+    if bool(rec.manual_disconnected) or str(rec.status or "").strip().lower() == "disconnected":
+        raise _m().HTTPException(
+            status_code=400,
+            detail=f"quote_collector_account_disconnected_manual_connect_required: {rec.account_id}",
+        )
+    result = _m()._start_qqq_0dte_quote_collector(owner_id=owner)
+    return {"ok": True, "action": "start", "result": result, "runtime": qqq_0dte_quote_collector_runtime(owner_id=owner)}
+
+
+def qqq_0dte_quote_collector_stop(owner_id: str | None = None) -> dict[str, Any]:
+    owner = _normalize_owner_id(owner_id)
+    result = _m()._stop_qqq_0dte_quote_collector()
+    return {"ok": True, "action": "stop", "result": result, "runtime": qqq_0dte_quote_collector_runtime(owner_id=owner)}
+
+
+def qqq_0dte_quote_collector_store_summary(day: str | None = None, owner_id: str | None = None) -> dict[str, Any]:
+    from api.services.qqq_0dte_quote_store import quote_store_summary
+
+    cfg = qqq_0dte_quote_collector_config_get(owner_id=owner_id)
+    day_key = str(day or "").strip() or datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    return quote_store_summary(str(cfg.get("db_path") or ""), day_et=day_key)
+
+
+def _stock_options_swing_config_path(owner_id: str | None = None) -> str:
+    m = _m()
+    owner = _normalize_owner_id(owner_id)
+    if owner:
+        return _owner_data_dir(owner, "stock_options_swing", "live_worker_config.json")
+    return os.path.join(m.ROOT, "data", "stock_options_swing", "live_worker_config.json")
+
+
+def stock_options_swing_config_get(owner_id: str | None = None) -> dict[str, Any]:
+    path = _stock_options_swing_config_path(owner_id)
+    legacy_path = os.path.join(_m().ROOT, "data", "stock_options_swing", "live_worker_config.json")
+    base = stock_options_swing_default_config()
+    if _normalize_owner_id(owner_id):
+        base = _stamp_config_owner_context(base, owner_id)
+    if _normalize_owner_id(owner_id) and not os.path.isfile(path) and os.path.isfile(legacy_path):
+        disk = _read_json_path(legacy_path)
+        if _legacy_config_matches_owner_context(disk, owner_id):
+            disk = _stamp_config_owner_context(disk, owner_id)
+            _write_json_path(path, disk)
+    if not os.path.isfile(path):
+        return dict(base)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            disk = json.load(f)
+        if not isinstance(disk, dict):
+            return dict(base)
+        merged = dict(base)
+        merged.update({k: v for k, v in disk.items() if k not in {"strategy", "risk"}})
+        if isinstance(disk.get("strategy"), dict):
+            strat = dict(base["strategy"])
+            strat.update(disk["strategy"])
+            merged["strategy"] = strat
+        if isinstance(disk.get("risk"), dict):
+            risk = dict(base["risk"])
+            risk.update(disk["risk"])
+            merged["risk"] = risk
+        return _stamp_config_owner_context(merged, owner_id) if _normalize_owner_id(owner_id) else merged
+    except Exception:
+        return dict(base)
+
+
+def stock_options_swing_config_put(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    from fastapi import HTTPException
+
+    path = _stock_options_swing_config_path(owner_id)
+    cur = stock_options_swing_config_get(owner_id=owner_id)
+    payload = body if isinstance(body, dict) else {}
+    before_live_submit = (not bool(cur.get("dry_run", True))) and bool(cur.get("auto_submit_orders", False))
+    after_dry_run = bool(payload.get("dry_run", cur.get("dry_run", True)))
+    after_auto_submit = bool(payload.get("auto_submit_orders", cur.get("auto_submit_orders", False)))
+    after_live_submit = (not after_dry_run) and after_auto_submit
+    if after_live_submit and not str(payload.get("confirmation_token") or cur.get("confirmation_token") or "").strip():
+        raise HTTPException(status_code=400, detail="confirmation_token_required_for_live_auto_submit")
+    if after_live_submit and not before_live_submit:
+        phrase = str(payload.get("live_submit_confirm") or "").strip()
+        if phrase != "CONFIRM_LIVE_AUTO_SUBMIT":
+            raise HTTPException(status_code=400, detail="live_auto_submit_second_confirmation_required")
+    for k, v in payload.items():
+        if k == "live_submit_confirm":
+            continue
+        if k == "strategy":
+            if isinstance(v, dict):
+                strat = dict(cur.get("strategy") or {})
+                strat.update(v)
+                cur["strategy"] = strat
+            continue
+        if k == "risk":
+            if isinstance(v, dict):
+                risk = dict(cur.get("risk") or {})
+                risk.update(v)
+                cur["risk"] = risk
+            continue
+        if k == "confirmation_token" and (v == "" or v is None):
+            cur[k] = None
+            continue
+        cur[k] = v
+    cur_live_submit = (not bool(cur.get("dry_run", True))) and bool(cur.get("auto_submit_orders", False))
+    if cur_live_submit:
+        cur["live_submit_confirmed_at"] = datetime.now(timezone.utc).isoformat()
+        cur["live_submit_confirmed_by"] = "local_ui"
+    else:
+        cur["live_submit_confirmed_at"] = None
+        cur["live_submit_confirmed_by"] = None
+    if not isinstance(cur.get("strategy"), dict):
+        cur["strategy"] = dict(stock_options_swing_default_config()["strategy"])
+    cur = _stamp_config_owner_context(cur, owner_id) if _normalize_owner_id(owner_id) else cur
+    _write_json_path(path, cur)
+    return {"ok": True, "config": cur}
+
+
+def _stock_options_swing_append_ledger(event: dict[str, Any]) -> dict[str, Any]:
+    m = _m()
+    path = os.path.join(m.ROOT, "data", "stock_options_swing", "live_worker_execution_ledger.jsonl")
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    payload = dict(event)
+    payload.setdefault("at", datetime.now(timezone.utc).isoformat())
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False, default=str))
+        f.write("\n")
+    return {"ok": True, "path": path, "event": payload}
+
+
+def stock_options_swing_refresh_positions_runtime(owner_id: str | None = None) -> dict[str, Any]:
+    m = _m()
+    cfg = stock_options_swing_config_get(owner_id=owner_id)
+    path = m.STOCK_OPTIONS_SWING_WORKER_RUNTIME_FILE
+    try:
+        from api import stock_options_swing_worker as sw
+
+        sw._API_BASE_URL = str(cfg.get("api_base_url") or sw._API_BASE_URL).strip().rstrip("/")
+        sw._API_BEARER_TOKEN = sw._resolve_api_bearer(cfg)
+        sw._API_KEY = sw._resolve_api_key(cfg)
+        sw._API_LOCAL_OWNER = str(owner_id or cfg.get("owner_id") or sw._API_LOCAL_OWNER or "").strip().lower()
+        sw._API_ACCOUNT_ID = str(cfg.get("account_id") or sw._API_ACCOUNT_ID or "").strip()
+        sw._API_BROKER_PROVIDER = str(cfg.get("broker_provider") or sw._API_BROKER_PROVIDER or "").strip().lower()
+        snapshot = sw.build_position_management_snapshot(cfg)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "path": path}
+
+    existing: dict[str, Any] = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                disk = json.load(f)
+            if isinstance(disk, dict):
+                existing = disk
+        except Exception:
+            existing = {}
+    merged = dict(existing)
+    merged.update(snapshot)
+    merged["updated_at"] = datetime.now(timezone.utc).isoformat()
+    merged["position_snapshot_refreshed_by"] = "manual_position_action"
+    if "worker_running" not in merged:
+        pid = read_pid_file(m.STOCK_OPTIONS_SWING_WORKER_PID_FILE)
+        merged["worker_running"] = bool(pid and is_pid_alive(pid))
+    if "pid" not in merged:
+        pid = read_pid_file(m.STOCK_OPTIONS_SWING_WORKER_PID_FILE)
+        if pid:
+            merged["pid"] = pid
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cur, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-    return {"ok": True, "config": cur}
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2, default=str)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "path": path, "snapshot": snapshot}
+    return {"ok": True, "path": path, "runtime": merged}
 
 
-def qqq_0dte_live_worker_config_put(body: dict[str, Any]) -> dict[str, Any]:
-    return qqq_live_worker_config_put("0dte", body if isinstance(body, dict) else {})
+def stock_options_swing_position_action(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    from fastapi import HTTPException
+
+    payload = body if isinstance(body, dict) else {}
+    action = str(payload.get("action") or "").strip().lower()
+    option_symbol = str(payload.get("symbol") or payload.get("option_symbol") or "").strip().upper()
+    underlying = str(payload.get("underlying") or "").strip().upper()
+    if underlying and "." not in underlying:
+        underlying = f"{underlying}.US"
+    if not option_symbol and action in {"import", "unmanage"}:
+        raise HTTPException(status_code=400, detail="option_symbol_required")
+    cfg = stock_options_swing_config_get(owner_id=owner_id)
+    if action == "import":
+        result = _stock_options_swing_append_ledger(
+            {
+                "event": "imported_existing_position",
+                "option_symbol": option_symbol,
+                "symbol": option_symbol,
+                "underlying": underlying,
+                "quantity": payload.get("quantity"),
+                "cost_price": payload.get("cost_price"),
+                "current_price": payload.get("current_price"),
+                "source": "manual_ui_import",
+                "owner_id": owner_id,
+                "account_id": cfg.get("account_id"),
+                "broker_provider": cfg.get("broker_provider"),
+            }
+        )
+        result["refresh"] = stock_options_swing_refresh_positions_runtime(owner_id=owner_id)
+        return result
+    if action == "unmanage":
+        result = _stock_options_swing_append_ledger(
+            {
+                "event": "closed",
+                "option_symbol": option_symbol,
+                "symbol": option_symbol,
+                "underlying": underlying,
+                "source": "manual_ui_unmanage",
+                "owner_id": owner_id,
+                "account_id": cfg.get("account_id"),
+                "broker_provider": cfg.get("broker_provider"),
+            }
+        )
+        result["refresh"] = stock_options_swing_refresh_positions_runtime(owner_id=owner_id)
+        return result
+    if action in {"blacklist", "unblacklist"}:
+        target = underlying
+        if not target and option_symbol:
+            import re
+
+            m = re.match(r"^([A-Z0-9]+?)(\d{6}|\d{8})[CP]\d+\.US$", option_symbol)
+            if m:
+                root = re.sub(r"\d+$", "", m.group(1)) or m.group(1)
+                target = f"{root}.US"
+        if not target:
+            raise HTTPException(status_code=400, detail="underlying_required")
+        cur = stock_options_swing_config_get(owner_id=owner_id)
+        rows = cur.get("symbol_blacklist") if isinstance(cur.get("symbol_blacklist"), list) else []
+        values = {str(x or "").strip().upper() for x in rows if str(x or "").strip()}
+        if action == "blacklist":
+            values.add(target)
+        else:
+            values.discard(target)
+        result = stock_options_swing_config_put({"symbol_blacklist": sorted(values)}, owner_id=owner_id)
+        result["refresh"] = stock_options_swing_refresh_positions_runtime(owner_id=owner_id)
+        return result
+    raise HTTPException(status_code=400, detail="unsupported_action")
 
 
-def qqq_1dte_live_worker_config_put(body: dict[str, Any]) -> dict[str, Any]:
-    return qqq_live_worker_config_put("1dte", body if isinstance(body, dict) else {})
+def _row_matches_runtime_account_context(row: dict[str, Any] | None, context: dict[str, str] | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    ctx = context if isinstance(context, dict) else {}
+    for key in ("owner_id", "account_id", "broker_provider"):
+        current = str(ctx.get(key) or "").strip().lower()
+        got = str(row.get(key) or "").strip().lower()
+        if current and (not got or got != current):
+            return False
+    return True
 
 
-def qqq_live_worker_decision_tail_get(instance: str, limit: int = 20) -> dict[str, Any]:
+def _qqq_live_status_context(instance: str, owner_id: str | None = None) -> dict[str, str]:
+    m = _m()
+    owner = str(owner_id or "").strip().lower()
+    if not owner:
+        return {}
+    try:
+        return m._qqq_live_status_account_context(instance, owner)
+    except Exception:
+        return {"owner_id": owner}
+
+
+def _stock_options_swing_status_context(owner_id: str | None = None) -> dict[str, str]:
+    m = _m()
+    owner = str(owner_id or "").strip().lower()
+    if not owner:
+        return {}
+    try:
+        return m._stock_options_swing_status_account_context(owner)
+    except Exception:
+        return {"owner_id": owner}
+
+
+def qqq_live_worker_decision_tail_get(instance: str, limit: int = 20, owner_id: str | None = None) -> dict[str, Any]:
     """读取指定实例 Worker 的决策尾 JSONL。"""
     m = _m()
     sub = _qqq_live_worker_data_subdir(instance)
     path = os.path.join(m.ROOT, "data", sub, "live_worker_decision_tail.jsonl")
     lim = max(1, min(100, int(limit)))
+    context = _qqq_live_status_context(instance, owner_id)
     if not os.path.isfile(path):
-        return {"ok": True, "items": [], "path": path, "returned": 0}
+        return {"ok": True, "items": [], "path": path, "returned": 0, "account_context": context or None}
     try:
         chunk = 512 * 1024
         with open(path, "rb") as f:
@@ -2667,26 +3862,63 @@ def qqq_live_worker_decision_tail_get(instance: str, limit: int = 20) -> dict[st
                 if nl >= 0:
                     raw = raw[nl + 1 :]
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-        tail = lines[-lim:]
+        tail = lines[-max(lim, 100):]
         items: list[Any] = []
         for ln in tail:
             try:
                 row = json.loads(ln)
-                if isinstance(row, dict):
+                if isinstance(row, dict) and _row_matches_runtime_account_context(row, context):
                     items.append(row)
             except Exception:
                 continue
-        return {"ok": True, "items": items, "path": path, "returned": len(items)}
+        items = items[-lim:]
+        return {"ok": True, "items": items, "path": path, "returned": len(items), "account_context": context or None}
     except Exception as e:
         return {"ok": False, "error": str(e), "items": [], "path": path, "returned": 0}
 
 
-def qqq_0dte_live_worker_decision_tail_get(limit: int = 20) -> dict[str, Any]:
-    return qqq_live_worker_decision_tail_get("0dte", limit)
+def qqq_0dte_live_worker_decision_tail_get(limit: int = 20, owner_id: str | None = None) -> dict[str, Any]:
+    return qqq_live_worker_decision_tail_get("0dte", limit, owner_id=owner_id)
 
 
-def qqq_1dte_live_worker_decision_tail_get(limit: int = 20) -> dict[str, Any]:
-    return qqq_live_worker_decision_tail_get("1dte", limit)
+def qqq_1dte_live_worker_decision_tail_get(limit: int = 20, owner_id: str | None = None) -> dict[str, Any]:
+    return qqq_live_worker_decision_tail_get("1dte", limit, owner_id=owner_id)
+
+
+def stock_options_swing_decision_tail_get(limit: int = 20, owner_id: str | None = None) -> dict[str, Any]:
+    m = _m()
+    path = os.path.join(m.ROOT, "data", "stock_options_swing", "live_worker_decision_tail.jsonl")
+    lim = max(1, min(100, int(limit)))
+    context = _stock_options_swing_status_context(owner_id)
+    if not os.path.isfile(path):
+        return {"ok": True, "items": [], "path": path, "returned": 0, "account_context": context or None}
+    try:
+        chunk = 512 * 1024
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            sz = f.tell()
+            if sz <= chunk:
+                f.seek(0)
+                raw = f.read().decode("utf-8", errors="ignore")
+            else:
+                f.seek(max(0, sz - chunk))
+                raw = f.read().decode("utf-8", errors="ignore")
+                nl = raw.find("\n")
+                if nl >= 0:
+                    raw = raw[nl + 1 :]
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        items: list[Any] = []
+        for ln in lines[-max(lim, 100):]:
+            try:
+                obj = json.loads(ln)
+            except Exception:
+                obj = {"raw": ln}
+            if isinstance(obj, dict) and _row_matches_runtime_account_context(obj, context):
+                items.append(obj)
+        items = items[-lim:]
+        return {"ok": True, "items": items, "path": path, "returned": len(items), "account_context": context or None}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "items": [], "path": path, "returned": 0}
 
 
 def _qqq_live_strategy_recommendation_compute_live(instance: str) -> dict[str, Any] | None:
@@ -2977,6 +4209,68 @@ def trade_positions(account_id: str | None = None, owner_id: str | None = None) 
     return {"positions": rows}
 
 
+def _order_raw_value(row: Any, *names: str) -> Any:
+    for name in names:
+        val = getattr(row, name, None)
+        if val not in (None, ""):
+            return val
+    raw = getattr(row, "raw", None)
+    if isinstance(raw, dict):
+        for name in names:
+            val = raw.get(name)
+            if val not in (None, ""):
+                return val
+    return None
+
+
+def _order_float_value(row: Any, *names: str) -> float:
+    val = _order_raw_value(row, *names)
+    try:
+        return float(val) if val not in (None, "") else 0.0
+    except Exception:
+        return 0.0
+
+
+def _order_filled_quantity(row: Any) -> float:
+    return _order_float_value(
+        row,
+        "filled_quantity",
+        "filled_qty",
+        "executed_quantity",
+        "dealt_quantity",
+        "filledQuantity",
+        "filledQty",
+        "filled_quantity",
+        "dealQuantity",
+    )
+
+
+def _order_avg_fill_price(row: Any) -> float:
+    return _order_float_value(
+        row,
+        "avg_fill_price",
+        "average_fill_price",
+        "executed_price",
+        "dealt_avg_price",
+        "filledPrice",
+        "avgFilledPrice",
+        "dealAvgPrice",
+    )
+
+
+def _order_to_dict(row: Any, fallback_order_id: str | None = None) -> dict[str, Any]:
+    return {
+        "order_id": str(_order_raw_value(row, "order_id", "orderId", "id") or fallback_order_id or ""),
+        "symbol": str(_order_raw_value(row, "symbol") or ""),
+        "side": str(_order_raw_value(row, "side") or ""),
+        "quantity": _order_float_value(row, "quantity", "submitted_quantity", "submittedQuantity"),
+        "price": _order_float_value(row, "price", "submitted_price", "submittedPrice") or None,
+        "status": str(_order_raw_value(row, "status", "order_status", "orderStatus") or ""),
+        "filled_quantity": _order_filled_quantity(row),
+        "avg_fill_price": _order_avg_fill_price(row),
+    }
+
+
 def trade_orders(status: str = "all", account_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
     query = {"status": status}
@@ -3001,6 +4295,8 @@ def trade_orders(status: str = "all", account_id: str | None = None, owner_id: s
                     "quantity": float(o.quantity),
                     "price": float(o.price) if o.price else None,
                     "status": s,
+                    "filled_quantity": _order_filled_quantity(o),
+                    "avg_fill_price": _order_avg_fill_price(o),
                 }
             )
         return {"orders": orders}
@@ -3024,6 +4320,24 @@ def trade_orders(status: str = "all", account_id: str | None = None, owner_id: s
             }
         )
     return {"orders": orders}
+
+
+def trade_order_detail(order_id: str, account_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]:
+    oid = str(order_id or "").strip()
+    if not oid:
+        return {}
+    orders = trade_orders(status="all", account_id=account_id, owner_id=owner_id).get("orders")
+    if isinstance(orders, list):
+        for row in orders:
+            if isinstance(row, dict) and str(row.get("order_id") or "").strip() == oid:
+                return dict(row)
+    m = _m()
+
+    def _load() -> dict[str, Any]:
+        _, tctx = m.ensure_contexts(account_id, owner_id=owner_id)
+        return _order_to_dict(m.broker_get_order_detail(tctx, oid), fallback_order_id=oid)
+
+    return _with_trade_context_retry("trade_order_detail", account_id=account_id, owner_id=owner_id, fn=_load)
 
 
 def trade_submit_order(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
@@ -3193,6 +4507,8 @@ def trade_orders(status: str = "all", account_id: str | None = None, owner_id: s
                     "quantity": float(o.quantity),
                     "price": float(o.price) if o.price else None,
                     "status": s,
+                    "filled_quantity": _order_filled_quantity(o),
+                    "avg_fill_price": _order_avg_fill_price(o),
                 }
             )
         return {"orders": orders}
@@ -3202,10 +4518,18 @@ def trade_orders(status: str = "all", account_id: str | None = None, owner_id: s
 
 def auto_trader_status(owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
-    cfg = m.auto_trader.get_config()
+    trader = _auto_trader_service(owner_id)
+    cfg = trader.get_config()
+    runtime_raw = m._auto_trader_runtime_status()
+    context = _auto_trader_status_context(owner_id)
+    runtime = (
+        runtime_raw
+        if (not context or _runtime_matches_account_context(runtime_raw, context))
+        else _context_mismatch_runtime(runtime_raw, context)
+    )
     out = build_auto_trader_status_response(
-        status=m.auto_trader.get_status(),
-        runtime=m._auto_trader_runtime_status(),
+        status=trader.get_status(),
+        runtime=runtime,
         research=get_research_status(),
         config=cfg,
     )
@@ -3215,11 +4539,12 @@ def auto_trader_status(owner_id: str | None = None) -> dict[str, Any]:
 
 def auto_trader_config(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
+    trader = _auto_trader_service(owner_id)
     parsed = AutoTraderConfigBody.model_validate(body if isinstance(body, dict) else {})
     payload = {k: v for k, v in parsed.model_dump().items() if v is not None}
     return apply_auto_trader_config_update(
         payload=payload,
-        update_config=m.auto_trader.update_config,
+        update_config=trader.update_config,
         sync_worker=lambda cfg: m._sync_auto_trader_worker_with_config(cfg, owner_id=owner_id),
     )
 
@@ -3236,69 +4561,76 @@ def auto_trader_config_policy() -> dict[str, Any]:
 
 def auto_trader_config_agent_update(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
+    trader = _auto_trader_service(owner_id)
     parsed = AutoTraderConfigBody.model_validate(body if isinstance(body, dict) else {})
     raw_payload = {k: v for k, v in parsed.model_dump().items() if v is not None}
     return apply_agent_policy_update(
         raw_payload=raw_payload,
-        current_config=m.auto_trader.get_config(),
+        current_config=trader.get_config(),
         validate_update=m._validate_agent_policy_update,
         locked_fields=m.AGENT_POLICY_LOCKED_FIELDS,
         allowed_field_rules=m.AGENT_POLICY_FIELD_RULES,
-        update_config=m.auto_trader.update_config,
+        update_config=trader.update_config,
         sync_worker=lambda cfg: m._sync_auto_trader_worker_with_config(cfg, owner_id=owner_id),
     )
 
 
 def auto_trader_template_apply(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
+    trader = _auto_trader_service(owner_id)
     parsed = AutoTraderTemplateApplyBody.model_validate(body if isinstance(body, dict) else {})
     return apply_template_with_sync(
         template_name=parsed.name,
-        apply_template=m.auto_trader.apply_template,
+        apply_template=trader.apply_template,
         sync_worker=lambda cfg: m._sync_auto_trader_worker_with_config(cfg, owner_id=owner_id),
     )
 
 
-def auto_trader_template_preview(name: Literal["trend", "mean_reversion", "defensive"]) -> dict[str, Any]:
-    m = _m()
-    return preview_template_safe(template_name=name, preview_template=m.auto_trader.preview_template)
+def auto_trader_template_preview(
+    name: Literal["trend", "mean_reversion", "defensive"],
+    owner_id: str | None = None,
+) -> dict[str, Any]:
+    trader = _auto_trader_service(owner_id)
+    return preview_template_safe(template_name=name, preview_template=trader.preview_template)
 
 
-def auto_trader_export_config() -> dict[str, Any]:
-    m = _m()
-    return {"config": redact_auto_trader_secrets_for_client(m.auto_trader.get_config())}
+def auto_trader_export_config(owner_id: str | None = None) -> dict[str, Any]:
+    trader = _auto_trader_service(owner_id)
+    return {"config": redact_auto_trader_secrets_for_client(trader.get_config())}
 
 
 def auto_trader_import_config(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
+    trader = _auto_trader_service(owner_id)
     parsed = AutoTraderImportBody.model_validate(body if isinstance(body, dict) else {})
     return import_config_with_rollback(
         config_obj=dict(parsed.config or {}),
-        current_config=m.auto_trader.get_config(),
+        current_config=trader.get_config(),
         validate_import_config=lambda cfg: AutoTraderImportConfigBody.model_validate(cfg).model_dump(exclude_none=True),
-        update_config=m.auto_trader.update_config,
+        update_config=trader.update_config,
         sync_worker=lambda cfg: m._sync_auto_trader_worker_with_config(cfg, owner_id=owner_id),
     )
 
 
-def auto_trader_config_backups() -> dict[str, Any]:
-    m = _m()
-    return {"items": m.auto_trader.list_config_backups()}
+def auto_trader_config_backups(owner_id: str | None = None) -> dict[str, Any]:
+    trader = _auto_trader_service(owner_id)
+    return {"items": trader.list_config_backups()}
 
 
 def auto_trader_config_rollback(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
+    trader = _auto_trader_service(owner_id)
     parsed = AutoTraderRollbackBody.model_validate(body if isinstance(body, dict) else {})
     return rollback_config_with_sync(
         backup_id=parsed.backup_id,
-        rollback_config=m.auto_trader.rollback_config,
+        rollback_config=trader.rollback_config,
         sync_worker=lambda cfg: m._sync_auto_trader_worker_with_config(cfg, owner_id=owner_id),
     )
 
 
-def auto_trader_config_rollback_preview(backup_id: str) -> dict[str, Any]:
-    m = _m()
-    return preview_rollback_safe(backup_id=backup_id, preview_rollback=m.auto_trader.preview_rollback)
+def auto_trader_config_rollback_preview(backup_id: str, owner_id: str | None = None) -> dict[str, Any]:
+    trader = _auto_trader_service(owner_id)
+    return preview_rollback_safe(backup_id=backup_id, preview_rollback=trader.preview_rollback)
 
 
 def auto_trader_strong_stocks(
@@ -3336,13 +4668,14 @@ def auto_trader_pair_backtest(
 
 def auto_trader_scan_run(owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
-    _assert_stock_auto_trader_safety(owner_id=owner_id, config=m.auto_trader.get_config())
-    return m.auto_trader_scan_run()
+    trader = _auto_trader_service(owner_id)
+    _assert_stock_auto_trader_safety(owner_id=owner_id, config=trader.get_config())
+    return m.auto_trader_scan_run(owner_id=owner_id)
 
 
-def auto_trader_signals(status: str = "all") -> dict[str, Any]:
+def auto_trader_signals(status: str = "all", owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
-    return m.auto_trader_signals(status=status)
+    return m.auto_trader_signals(status=status, owner_id=owner_id)
 
 
 def auto_trader_archive_legacy_unscoped_signals(reason: str = "manual") -> dict[str, Any]:
@@ -3357,10 +4690,33 @@ def auto_trader_archive_legacy_unscoped_signals(reason: str = "manual") -> dict[
     return result
 
 
-def auto_trader_confirm(signal_id: str, body: dict[str, Any]) -> dict[str, Any]:
+def auto_trader_prune_signals(reason: str = "manual") -> dict[str, Any]:
+    m = _m()
+    result = prune_persisted_signals(reason=reason)
+    try:
+        removed = m.auto_trader.drop_signals(list(result.get("archived_signal_ids") or []))
+    except Exception:
+        removed = 0
+    result["memory_removed_count"] = removed
+    return result
+
+
+def auto_trader_confirm(signal_id: str, body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
     parsed = AutoTraderConfirmBody.model_validate(body if isinstance(body, dict) else {})
-    return m.auto_trader_confirm(signal_id=signal_id, body=parsed)
+    return m.auto_trader_confirm(signal_id=signal_id, body=parsed, owner_id=owner_id)
+
+
+def auto_trader_confirm_preview(signal_id: str, owner_id: str | None = None) -> dict[str, Any]:
+    return _m().auto_trader_confirm_preview(signal_id=signal_id, owner_id=owner_id)
+
+
+def auto_trader_signal_sync(signal_id: str, owner_id: str | None = None) -> dict[str, Any]:
+    return _m().auto_trader_signal_sync(signal_id=signal_id, owner_id=owner_id)
+
+
+def auto_trader_signal_resolve(signal_id: str, body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+    return _m().auto_trader_signal_resolve(signal_id=signal_id, body=body, owner_id=owner_id)
 
 
 def auto_trader_metrics_recent(limit: int = 200, event: str | None = None) -> dict[str, Any]:

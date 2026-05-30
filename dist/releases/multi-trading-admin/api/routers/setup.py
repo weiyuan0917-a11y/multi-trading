@@ -82,8 +82,22 @@ def setup_risk_config(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
 
 @router.get("/setup/services/status")
-def setup_services_status() -> dict[str, Any]:
-    return rt.setup_services_status()
+def setup_services_status(authorization: str | None = Header(default=None), x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner")) -> dict[str, Any]:
+    owner = ""
+    try:
+        owner = require_local_owner(authorization, x_local_owner)
+    except HTTPException:
+        owner = ""
+    return rt.setup_services_status(owner_id=owner)
+
+
+@router.get("/setup/public-ip")
+def setup_public_ip(
+    authorization: str | None = Header(default=None),
+    x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner"),
+) -> dict[str, Any]:
+    _require_owner(authorization, x_local_owner)
+    return rt.setup_public_ip()
 
 
 @router.get("/setup/convex-dev/status")
@@ -147,6 +161,12 @@ def setup_account_disconnect(account_id: str, authorization: str | None = Header
     return rt.setup_account_disconnect(account_id=account_id, owner_id=user)
 
 
+@router.delete("/setup/accounts/{account_id}")
+def setup_account_delete(account_id: str, authorization: str | None = Header(default=None), x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner")) -> dict[str, Any]:
+    user = _require_owner(authorization, x_local_owner)
+    return rt.setup_account_delete(account_id=account_id, owner_id=user)
+
+
 @router.get("/setup/longport/diagnostics")
 def setup_longport_diagnostics(
     probe: bool = False,
@@ -162,18 +182,22 @@ def setup_start_services(body: dict[str, Any] = Body(...), authorization: str | 
     identity = require_local_identity(authorization, x_local_owner)
     if bool((body or {}).get("enable_auto_trader")):
         require_identity_entitlement(identity, "stock_auto_trading")
-    if bool((body or {}).get("enable_qqq_0dte_live")) or bool((body or {}).get("enable_qqq_1dte_live")):
+    if (
+        bool((body or {}).get("enable_qqq_0dte_live"))
+        or bool((body or {}).get("enable_qqq_1dte_live"))
+        or bool((body or {}).get("enable_stock_options_swing"))
+    ):
         require_identity_entitlement(identity, "option_auto_trading")
     return rt.setup_start_services(body, owner_id=identity.owner_id)
 
 
 @router.post("/setup/services/stop")
 def setup_stop_services(body: dict[str, Any] = Body(...), authorization: str | None = Header(default=None), x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner")) -> dict[str, Any]:
-    _require_owner(authorization, x_local_owner)
-    return rt.setup_stop_services(body)
+    user = _require_owner(authorization, x_local_owner)
+    return rt.setup_stop_services(body, owner_id=user)
 
 
 @router.post("/setup/services/stop-all")
 def setup_stop_all_services(body: dict[str, Any] = Body(...), authorization: str | None = Header(default=None), x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner")) -> dict[str, Any]:
-    _require_owner(authorization, x_local_owner)
-    return rt.setup_stop_all_services(body)
+    user = _require_owner(authorization, x_local_owner)
+    return rt.setup_stop_all_services(body, owner_id=user)

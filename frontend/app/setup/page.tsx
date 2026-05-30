@@ -56,6 +56,16 @@ type RiskCfg = {
   max_daily_loss_pct: number;
   stop_loss_pct: number;
   max_position_pct: number;
+  min_cash_ratio?: number;
+  max_total_risk_pct?: number;
+  max_stock_order_notional_pct?: number;
+  max_stock_position_pct?: number;
+  max_option_order_loss_pct?: number;
+  max_0dte_order_loss_pct?: number;
+  max_option_daily_new_risk_pct?: number;
+  max_total_option_risk_pct?: number;
+  block_naked_short_options?: boolean;
+  fail_closed_for_live?: boolean;
   enabled: boolean;
 };
 
@@ -169,6 +179,7 @@ const externalCredentialLinks = {
   longbridgeOpenApi: "https://open.longportapp.com/",
   tigerOpenApi: "https://quant.itigerup.com/openapi/",
   fosunOpenApi: "https://openapi-docs.fosunxcz.com/?spec=guidelines",
+  usmartOpenApi: "https://www.usmartsecurities.com/",
   feishuOpenPlatform: "https://open.feishu.cn/app",
   finnhub: "https://finnhub.io/register",
   tiingo: "https://www.tiingo.com/account/api/token",
@@ -431,7 +442,7 @@ export default function SetupPage() {
   const [accountsResp, setAccountsResp] = useState<SetupAccountsResponse | null>(null);
   const [accountsLoading, setAccountsLoading] = useState(false);
   const [registeringAccount, setRegisteringAccount] = useState(false);
-  const [accountActionLoading, setAccountActionLoading] = useState<Record<string, "connect" | "disconnect" | undefined>>({});
+  const [accountActionLoading, setAccountActionLoading] = useState<Record<string, "connect" | "disconnect" | "delete" | undefined>>({});
   const [generatingFosunKeyPair, setGeneratingFosunKeyPair] = useState(false);
   const [fosunClientPublicKey, setFosunClientPublicKey] = useState("");
   const [publicIpLoading, setPublicIpLoading] = useState(false);
@@ -459,6 +470,17 @@ export default function SetupPage() {
     fosun_sdk_type: "",
     fosun_apply_account_id: "",
     fosun_option_apply_account_id: "",
+    usmart_trade_host: "https://open-jy.yxzq.com",
+    usmart_quote_host: "https://open-hz.yxzq.com:8443",
+    usmart_x_lang: "1",
+    usmart_x_channel: "",
+    usmart_area_code: "86",
+    usmart_phone_number: "",
+    usmart_login_password: "",
+    usmart_trade_password: "",
+    usmart_server_public_key: "",
+    usmart_client_private_key: "",
+    usmart_timeout_seconds: "8",
     is_default: true,
     overwrite: true,
   });
@@ -516,7 +538,7 @@ export default function SetupPage() {
   });
   const taDraft = {
     enabled: form.tradingagents_enabled || status?.values?.tradingagents_enabled || "false",
-    timeoutSeconds: form.tradingagents_timeout_seconds || status?.values?.tradingagents_timeout_seconds || "25",
+    timeoutSeconds: form.tradingagents_timeout_seconds || status?.values?.tradingagents_timeout_seconds || "180",
     maxSymbols: form.tradingagents_max_symbols || status?.values?.tradingagents_max_symbols || "3",
     provider: form.tradingagents_llm_provider || status?.values?.tradingagents_llm_provider || "openai",
     deepModel: form.tradingagents_deep_model || status?.values?.tradingagents_deep_model || "gpt-5.4",
@@ -1176,7 +1198,11 @@ export default function SetupPage() {
 
   const probeLongPort = async () => {
     try {
-      const dg = await apiGet<LongPortDiag>("/setup/longport/diagnostics?probe=true");
+      const dg = await apiGet<LongPortDiag>("/setup/longport/diagnostics?probe=true", {
+        timeoutMs: 45000,
+        retries: 0,
+        cacheTtlMs: 0,
+      });
       setDiag(dg);
       setErr("");
     } catch (e: any) {
@@ -1233,6 +1259,21 @@ export default function SetupPage() {
           option_apply_account_id: accountForm.fosun_option_apply_account_id.trim(),
         };
       }
+      if (brokerProvider === "usmart") {
+        payload.credentials = {
+          trade_host: accountForm.usmart_trade_host.trim(),
+          quote_host: accountForm.usmart_quote_host.trim(),
+          x_lang: accountForm.usmart_x_lang.trim() || "1",
+          x_channel: accountForm.usmart_x_channel.trim(),
+          area_code: accountForm.usmart_area_code.trim() || "86",
+          phone_number: accountForm.usmart_phone_number.trim(),
+          login_password: accountForm.usmart_login_password,
+          trade_password: accountForm.usmart_trade_password,
+          server_public_key: accountForm.usmart_server_public_key.trim(),
+          client_private_key: accountForm.usmart_client_private_key.trim(),
+          timeout_seconds: accountForm.usmart_timeout_seconds.trim(),
+        };
+      }
       await apiPost("/setup/accounts/register", payload);
       setMsg(`账户 ${payload.account_id} 已注册。`);
       setErr("");
@@ -1257,6 +1298,12 @@ export default function SetupPage() {
         fosun_sdk_type: "",
         fosun_apply_account_id: "",
         fosun_option_apply_account_id: "",
+        usmart_x_channel: "",
+        usmart_phone_number: "",
+        usmart_login_password: "",
+        usmart_trade_password: "",
+        usmart_server_public_key: "",
+        usmart_client_private_key: "",
       }));
       const latest = await apiGet<SetupAccountsResponse>("/setup/accounts");
       setAccountsResp(latest);
@@ -1276,7 +1323,7 @@ export default function SetupPage() {
       const resp = await apiPost<any>(
         `/setup/accounts/${encodeURIComponent(aid)}/connect`,
         {},
-        { timeoutMs: 15000, retries: 0 }
+        { timeoutMs: 45000, retries: 0 }
       );
       const processes = Array.isArray(resp?.auto_stopped_processes)
         ? resp.auto_stopped_processes
@@ -1329,6 +1376,43 @@ export default function SetupPage() {
       }
       setErr("");
       const latest = await apiGet<SetupAccountsResponse>("/setup/accounts");
+      setAccountsResp(latest);
+      await refreshFeeBrokersMeta().catch(() => {});
+    } catch (e: any) {
+      setErr(String(e.message || e));
+    } finally {
+      setAccountActionLoading((s) => ({ ...s, [aid]: undefined }));
+    }
+  };
+
+  const deleteAccount = async (accountId: string, brokerProvider?: string) => {
+    const aid = String(accountId || "").trim();
+    if (!aid) return;
+    const broker = String(brokerProvider || "").trim();
+    const label = broker ? `${aid} / ${broker}` : aid;
+    if (!window.confirm(`确定删除券商账户 ${label}？本地保存的该账户 API 密钥也会从账户列表中移除。`)) return;
+    setAccountActionLoading((s) => ({ ...s, [aid]: "delete" }));
+    try {
+      const resp = await apiDelete<any>(`/setup/accounts/${encodeURIComponent(aid)}`, {
+        timeoutMs: 30000,
+        retries: 0,
+      });
+      const processes = Array.isArray(resp?.auto_stopped_processes)
+        ? resp.auto_stopped_processes
+        : Array.isArray(resp?.auto_stopped_workers)
+          ? resp.auto_stopped_workers
+          : [];
+      const stoppedNames = processes
+        .filter((x: any) => String(x?.stop_status || "").startsWith("stopped"))
+        .map((x: any) => String(x?.process || x?.worker || ""))
+        .filter(Boolean);
+      setMsg(
+        stoppedNames.length
+          ? `账户 ${aid} 已删除，并已停止相关自动交易进程：${stoppedNames.join(", ")}`
+          : `账户 ${aid} 已删除。`
+      );
+      setErr("");
+      const latest = await apiGet<SetupAccountsResponse>("/setup/accounts", { cacheTtlMs: 0 });
       setAccountsResp(latest);
       await refreshFeeBrokersMeta().catch(() => {});
     } catch (e: any) {
@@ -1702,20 +1786,27 @@ export default function SetupPage() {
                     </td>
                     <td className="px-3 py-2 text-rose-300">{ac.last_error || "-"}</td>
                     <td className="px-3 py-2">
-                      <div className="flex gap-2">
+                      <div className="flex flex-wrap gap-2">
                         <button
                           className="btn-secondary px-2 py-1 text-xs"
                           onClick={() => connectAccount(ac.account_id)}
-                          disabled={accountActionLoading[ac.account_id] === "connect" || (!ac.manual_disconnected && ac.quote_ready && ac.trade_ready)}
+                          disabled={!!accountActionLoading[ac.account_id] || (!ac.manual_disconnected && ac.quote_ready && ac.trade_ready)}
                         >
                           {accountActionLoading[ac.account_id] === "connect" ? "连接中..." : "连接"}
                         </button>
                         <button
                           className="btn-secondary px-2 py-1 text-xs"
                           onClick={() => disconnectAccount(ac.account_id)}
-                          disabled={accountActionLoading[ac.account_id] === "disconnect" || !!ac.manual_disconnected}
+                          disabled={!!accountActionLoading[ac.account_id] || !!ac.manual_disconnected}
                         >
                           {accountActionLoading[ac.account_id] === "disconnect" ? "断开中..." : "断开"}
+                        </button>
+                        <button
+                          className="btn-secondary border-rose-500/40 px-2 py-1 text-xs text-rose-200"
+                          onClick={() => deleteAccount(ac.account_id, ac.broker_provider)}
+                          disabled={!!accountActionLoading[ac.account_id]}
+                        >
+                          {accountActionLoading[ac.account_id] === "delete" ? "删除中..." : "删除"}
                         </button>
                       </div>
                     </td>
@@ -1828,45 +1919,49 @@ export default function SetupPage() {
               覆盖同名
             </label>
           </div>
-          <SecretInputWithLink
-            label="申请 Longbridge OpenAPI"
-            href={externalCredentialLinks.longbridgeOpenApi}
-            input={
-              <input
-                className="input-base"
-                type="password"
-                placeholder="LONGPORT_APP_KEY（可留空，回退环境配置）"
-                value={accountForm.longport_app_key}
-                onChange={(e) => setAccountForm((s) => ({ ...s, longport_app_key: e.target.value }))}
+          {["longbridge", "longport"].includes(accountForm.broker_provider.trim().toLowerCase()) ? (
+            <>
+              <SecretInputWithLink
+                label="申请 Longbridge OpenAPI"
+                href={externalCredentialLinks.longbridgeOpenApi}
+                input={
+                  <input
+                    className="input-base"
+                    type="password"
+                    placeholder="LONGPORT_APP_KEY（可留空，回退环境配置）"
+                    value={accountForm.longport_app_key}
+                    onChange={(e) => setAccountForm((s) => ({ ...s, longport_app_key: e.target.value }))}
+                  />
+                }
               />
-            }
-          />
-          <SecretInputWithLink
-            label="申请 Longbridge OpenAPI"
-            href={externalCredentialLinks.longbridgeOpenApi}
-            input={
-              <input
-                className="input-base"
-                type="password"
-                placeholder="LONGPORT_APP_SECRET（可留空，回退环境配置）"
-                value={accountForm.longport_app_secret}
-                onChange={(e) => setAccountForm((s) => ({ ...s, longport_app_secret: e.target.value }))}
+              <SecretInputWithLink
+                label="申请 Longbridge OpenAPI"
+                href={externalCredentialLinks.longbridgeOpenApi}
+                input={
+                  <input
+                    className="input-base"
+                    type="password"
+                    placeholder="LONGPORT_APP_SECRET（可留空，回退环境配置）"
+                    value={accountForm.longport_app_secret}
+                    onChange={(e) => setAccountForm((s) => ({ ...s, longport_app_secret: e.target.value }))}
+                  />
+                }
               />
-            }
-          />
-          <SecretInputWithLink
-            label="申请 Longbridge OpenAPI"
-            href={externalCredentialLinks.longbridgeOpenApi}
-            input={
-              <input
-                className="input-base"
-                type="password"
-                placeholder="LONGPORT_ACCESS_TOKEN（可留空，回退环境配置）"
-                value={accountForm.longport_access_token}
-                onChange={(e) => setAccountForm((s) => ({ ...s, longport_access_token: e.target.value }))}
+              <SecretInputWithLink
+                label="申请 Longbridge OpenAPI"
+                href={externalCredentialLinks.longbridgeOpenApi}
+                input={
+                  <input
+                    className="input-base"
+                    type="password"
+                    placeholder="LONGPORT_ACCESS_TOKEN（可留空，回退环境配置）"
+                    value={accountForm.longport_access_token}
+                    onChange={(e) => setAccountForm((s) => ({ ...s, longport_access_token: e.target.value }))}
+                  />
+                }
               />
-            }
-          />
+            </>
+          ) : null}
           {["tiger", "itiger"].includes(accountForm.broker_provider.trim().toLowerCase()) ? (
             <div className="grid gap-2 rounded border border-slate-700/70 bg-slate-950/40 p-3">
               <div className="flex items-center justify-between gap-2">
@@ -2050,6 +2145,91 @@ export default function SetupPage() {
               />
               <p className="text-xs leading-5 text-slate-500">
                 系统会在连接该账户时临时注入 SDK 所需 PEM 环境变量；不需要写入 Windows 全局环境变量。第一版已支持账户、行情、资金、持仓、订单、下单和撤单；期权链选择仍需后续单独适配。
+              </p>
+            </div>
+          ) : null}
+          {accountForm.broker_provider.trim().toLowerCase() === "usmart" ? (
+            <div className="grid gap-2 rounded border border-slate-700/70 bg-slate-950/40 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-medium text-slate-300">uSMART OpenAPI</div>
+                <CredentialLink href={externalCredentialLinks.usmartOpenApi}>查看 uSMART 官网</CredentialLink>
+              </div>
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                <input
+                  className="input-base"
+                  placeholder="trade_host，例如 https://open-jy.yxzq.com"
+                  value={accountForm.usmart_trade_host}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_trade_host: e.target.value }))}
+                />
+                <input
+                  className="input-base"
+                  placeholder="quote_host，例如 https://open-hz.yxzq.com:8443"
+                  value={accountForm.usmart_quote_host}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_quote_host: e.target.value }))}
+                />
+                <input
+                  className="input-base"
+                  placeholder="X-Channel 渠道号"
+                  value={accountForm.usmart_x_channel}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_x_channel: e.target.value }))}
+                  autoComplete="off"
+                />
+                <input
+                  className="input-base"
+                  placeholder="X-Lang，默认 1"
+                  value={accountForm.usmart_x_lang}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_x_lang: e.target.value }))}
+                />
+                <input
+                  className="input-base"
+                  placeholder="areaCode，默认 86"
+                  value={accountForm.usmart_area_code}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_area_code: e.target.value }))}
+                />
+                <input
+                  className="input-base"
+                  placeholder="phoneNumber"
+                  value={accountForm.usmart_phone_number}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_phone_number: e.target.value }))}
+                  autoComplete="off"
+                />
+                <input
+                  className="input-base"
+                  type="password"
+                  placeholder="login_password"
+                  value={accountForm.usmart_login_password}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_login_password: e.target.value }))}
+                  autoComplete="new-password"
+                />
+                <input
+                  className="input-base"
+                  type="password"
+                  placeholder="trade_password"
+                  value={accountForm.usmart_trade_password}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_trade_password: e.target.value }))}
+                  autoComplete="new-password"
+                />
+                <input
+                  className="input-base"
+                  placeholder="timeout_seconds，默认 8"
+                  value={accountForm.usmart_timeout_seconds}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_timeout_seconds: e.target.value }))}
+                />
+              </div>
+              <textarea
+                className="input-base min-h-24 font-mono text-xs"
+                placeholder="uSMART 服务端 PUBLIC KEY PEM 或去掉头尾后的内容"
+                value={accountForm.usmart_server_public_key}
+                onChange={(e) => setAccountForm((s) => ({ ...s, usmart_server_public_key: e.target.value }))}
+              />
+              <textarea
+                className="input-base min-h-24 font-mono text-xs"
+                placeholder="uSMART 客户端 PRIVATE KEY PEM 或去掉头尾后的内容"
+                value={accountForm.usmart_client_private_key}
+                onChange={(e) => setAccountForm((s) => ({ ...s, usmart_client_private_key: e.target.value }))}
+              />
+              <p className="text-xs leading-5 text-slate-500">
+                根据本地 demo 接入：登录、交易解锁、实时行情、持仓、今日委托、股票下单和撤单已映射；期权链、期权报价和历史 K 线暂未映射，自动期权 worker 不应选择该券商。
               </p>
             </div>
           ) : null}
@@ -2571,13 +2751,13 @@ export default function SetupPage() {
                 type="number"
                 min={1}
                 step={1}
-                placeholder={`当前: ${status?.values.tradingagents_timeout_seconds || "25"}`}
+                placeholder={`当前: ${status?.values.tradingagents_timeout_seconds || "180"}`}
                 value={taDraft.timeoutSeconds}
                 onChange={(e) => setForm((s) => ({ ...s, tradingagents_timeout_seconds: e.target.value }))}
               />
             ) : (
               <select className="input-base mt-1" value={taDraft.timeoutSeconds} onChange={(e) => setForm((s) => ({ ...s, tradingagents_timeout_seconds: e.target.value }))}>
-                <option value="10">10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option><option value="30">30</option><option value="45">45</option><option value="60">60</option><option value="90">90</option><option value="120">120</option>
+                <option value="60">60</option><option value="90">90</option><option value="120">120</option><option value="180">180</option><option value="240">240</option><option value="300">300</option>
               </select>
             )}
           </label>
@@ -3121,6 +3301,62 @@ export default function SetupPage() {
                   <span className="text-xs font-medium text-slate-400">单仓最大占比</span>
                   <input className="input-base" type="number" step="0.01" value={risk.max_position_pct} onChange={(e) => setRisk({ ...risk, max_position_pct: Number(e.target.value) })} />
                   <span className="block text-[11px] text-slate-500">限制单个持仓占账户的比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">账户现金底线</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.min_cash_ratio ?? 0.2} onChange={(e) => setRisk({ ...risk, min_cash_ratio: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">例如 0.2 表示下单后保留 20% 现金/购买力。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">账户总风险上限</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_total_risk_pct ?? 0.1} onChange={(e) => setRisk({ ...risk, max_total_risk_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">所有自动交易合计风险暴露上限。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">股票单笔账户占比</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_stock_order_notional_pct ?? 0.03} onChange={(e) => setRisk({ ...risk, max_stock_order_notional_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">股票单笔名义金额占账户净值上限。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">股票单标的账户占比</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_stock_position_pct ?? 0.1} onChange={(e) => setRisk({ ...risk, max_stock_position_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">股票买入后单标的市值占账户净值上限。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">期权单笔最大亏损</span>
+                  <input className="input-base" type="number" step="0.001" value={risk.max_option_order_loss_pct ?? 0.005} onChange={(e) => setRisk({ ...risk, max_option_order_loss_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">普通期权单笔最大可亏损占账户净值比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">0DTE 单笔最大亏损</span>
+                  <input className="input-base" type="number" step="0.001" value={risk.max_0dte_order_loss_pct ?? 0.002} onChange={(e) => setRisk({ ...risk, max_0dte_order_loss_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">0DTE 单笔最大可亏损占账户净值比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">期权当日新增风险</span>
+                  <input className="input-base" type="number" step="0.001" value={risk.max_option_daily_new_risk_pct ?? 0.015} onChange={(e) => setRisk({ ...risk, max_option_daily_new_risk_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">当天新开期权最大风险占账户净值比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">期权总风险暴露</span>
+                  <input className="input-base" type="number" step="0.001" value={risk.max_total_option_risk_pct ?? 0.05} onChange={(e) => setRisk({ ...risk, max_total_option_risk_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">全部未平期权风险占账户净值比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">禁止裸卖期权</span>
+                  <select className="input-base" value={(risk.block_naked_short_options ?? true) ? "1" : "0"} onChange={(e) => setRisk({ ...risk, block_naked_short_options: e.target.value === "1" })}>
+                    <option value="1">禁止自动裸卖</option>
+                    <option value="0">允许策略自行控制</option>
+                  </select>
+                  <span className="block text-[11px] text-slate-500">建议保持禁止，裸卖期权应单独人工审批。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">实盘缺数据时</span>
+                  <select className="input-base" value={(risk.fail_closed_for_live ?? true) ? "1" : "0"} onChange={(e) => setRisk({ ...risk, fail_closed_for_live: e.target.value === "1" })}>
+                    <option value="1">拦截下单</option>
+                    <option value="0">仅记录告警</option>
+                  </select>
+                  <span className="block text-[11px] text-slate-500">账户净值或持仓不可用时的总风控行为。</span>
                 </label>
                 <label className="space-y-1 md:col-span-2 xl:col-span-1">
                   <span className="text-xs font-medium text-slate-400">风控总开关</span>

@@ -161,6 +161,12 @@ def setup_account_disconnect(account_id: str, authorization: str | None = Header
     return rt.setup_account_disconnect(account_id=account_id, owner_id=user)
 
 
+@router.delete("/setup/accounts/{account_id}")
+def setup_account_delete(account_id: str, authorization: str | None = Header(default=None), x_local_owner: str | None = Header(default=None, alias="X-MT-Local-Owner")) -> dict[str, Any]:
+    user = _require_owner(authorization, x_local_owner)
+    return rt.setup_account_delete(account_id=account_id, owner_id=user)
+
+
 @router.get("/setup/longport/diagnostics")
 def setup_longport_diagnostics(
     probe: bool = False,

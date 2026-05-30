@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 import { PageShell } from "@/components/ui/page-shell";
 import { SetupApiKeysPanel } from "@/components/setup-api-keys-panel";
 import { EntitlementNotice } from "@/components/entitlement-guard";
 import { useEntitlements } from "@/lib/use-entitlements";
+
+const IS_CUSTOMER_BUILD = process.env.NEXT_PUBLIC_MT_BUILD_TARGET === "customer";
 
 type SetupStatus = {
   configured: {
@@ -53,6 +56,16 @@ type RiskCfg = {
   max_daily_loss_pct: number;
   stop_loss_pct: number;
   max_position_pct: number;
+  min_cash_ratio?: number;
+  max_total_risk_pct?: number;
+  max_stock_order_notional_pct?: number;
+  max_stock_position_pct?: number;
+  max_option_order_loss_pct?: number;
+  max_0dte_order_loss_pct?: number;
+  max_option_daily_new_risk_pct?: number;
+  max_total_option_risk_pct?: number;
+  block_naked_short_options?: boolean;
+  fail_closed_for_live?: boolean;
   enabled: boolean;
 };
 
@@ -165,14 +178,47 @@ const SETUP_SECTIONS: Array<{
 const externalCredentialLinks = {
   longbridgeOpenApi: "https://open.longportapp.com/",
   tigerOpenApi: "https://quant.itigerup.com/openapi/",
+  fosunOpenApi: "https://openapi-docs.fosunxcz.com/?spec=guidelines",
+  usmartOpenApi: "https://www.usmartsecurities.com/",
   feishuOpenPlatform: "https://open.feishu.cn/app",
   finnhub: "https://finnhub.io/register",
   tiingo: "https://www.tiingo.com/account/api/token",
   polygon: "https://polygon.io/dashboard/signup",
   twelveData: "https://twelvedata.com/register",
   fred: "https://fred.stlouisfed.org/docs/api/api_key.html",
+  fmp: "https://site.financialmodelingprep.com/developer/docs",
   coingecko: "https://www.coingecko.com/en/developers/dashboard",
 } as const;
+
+const SUPPORTED_ACCOUNT_BROKERS = [
+  { broker_id: "longbridge", display_name: "长桥（默认）" },
+  { broker_id: "tiger", display_name: "老虎" },
+  { broker_id: "fosun", display_name: "复兴证券" },
+];
+
+const mergeBrokerOptions = (brokers: { broker_id: string; display_name: string }[]) => {
+  const merged = new Map<string, { broker_id: string; display_name: string }>();
+  for (const b of SUPPORTED_ACCOUNT_BROKERS) {
+    merged.set(b.broker_id, b);
+  }
+  for (const b of brokers) {
+    const id = String(b.broker_id || "").trim();
+    if (!id) continue;
+    merged.set(id, { broker_id: id, display_name: String(b.display_name || id) });
+  }
+  return Array.from(merged.values()).sort((a, b) => a.broker_id.localeCompare(b.broker_id));
+};
+
+const pemFromArrayBuffer = (label: string, buffer: ArrayBuffer) => {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  const body = btoa(binary).match(/.{1,64}/g)?.join("\n") || "";
+  return `-----BEGIN ${label}-----\n${body}\n-----END ${label}-----`;
+};
 
 function CredentialLink({ href, children }: { href: string; children: string }) {
   return (
@@ -197,6 +243,29 @@ function SecretInputWithLink({
       {input}
     </div>
   );
+}
+
+function openbbReasonText(reason: unknown): string {
+  const value = String(reason || "").trim();
+  const messages: Record<string, string> = {
+    empty_or_fmp_key_missing: "未配置 FMP Key",
+    fmp_payment_required: "FMP 套餐不支持该端点",
+    fmp_endpoint_not_found: "FMP/OpenBB 端点不可用",
+    fmp_key_unauthorized: "FMP Key 无效",
+    fmp_forbidden: "FMP Key 无权访问",
+    empty_fmp_response: "FMP 返回空数据",
+    empty_openbb_fmp_response: "OpenBB FMP 返回空数据",
+    openbb_disabled_or_unconfigured: "OpenBB 未启用或未配置",
+    openbb_auto_start_disabled: "OpenBB 自动启动关闭",
+    openbb_port_occupied: "OpenBB 端口已被占用",
+    openbb_command_not_found: "找不到 OpenBB API 命令",
+    openbb_unreachable: "OpenBB 无法连接",
+  };
+  return messages[value] || value || "-";
+}
+
+function openbbOkText(ok: unknown): string {
+  return ok ? "OK" : "不可用";
 }
 
 const setupToneDotClass = (tone: SetupSectionTone) =>
@@ -344,11 +413,12 @@ export default function SetupPage() {
   const [diag, setDiag] = useState<LongPortDiag | null>(null);
   const [saving, setSaving] = useState(false);
   const [testingOpenbb, setTestingOpenbb] = useState(false);
+  const [restartingOpenbb, setRestartingOpenbb] = useState(false);
+  const [openbbDiagnostics, setOpenbbDiagnostics] = useState<any>(null);
   const [installingCnProvider, setInstallingCnProvider] = useState("");
   const [cnInstallRestartHint, setCnInstallRestartHint] = useState<Record<string, boolean>>({});
   const [taAdvancedMode, setTaAdvancedMode] = useState(false);
   const [activeSection, setActiveSection] = useState<SetupSectionKey>("accounts");
-  const [starting, setStarting] = useState(false);
   const [stoppingAll, setStoppingAll] = useState(false);
   const [savingFees, setSavingFees] = useState(false);
   const [msg, setMsg] = useState("");
@@ -372,7 +442,11 @@ export default function SetupPage() {
   const [accountsResp, setAccountsResp] = useState<SetupAccountsResponse | null>(null);
   const [accountsLoading, setAccountsLoading] = useState(false);
   const [registeringAccount, setRegisteringAccount] = useState(false);
-  const [accountActionLoading, setAccountActionLoading] = useState<Record<string, "connect" | "disconnect" | undefined>>({});
+  const [accountActionLoading, setAccountActionLoading] = useState<Record<string, "connect" | "disconnect" | "delete" | undefined>>({});
+  const [generatingFosunKeyPair, setGeneratingFosunKeyPair] = useState(false);
+  const [fosunClientPublicKey, setFosunClientPublicKey] = useState("");
+  const [publicIpLoading, setPublicIpLoading] = useState(false);
+  const [publicIpInfo, setPublicIpInfo] = useState<{ ip?: string; source?: string; error?: string } | null>(null);
   const [accountForm, setAccountForm] = useState({
     account_id: "default",
     broker_provider: "longbridge",
@@ -387,6 +461,26 @@ export default function SetupPage() {
     tiger_props_path: "",
     tiger_secret_key: "",
     tiger_token_path: "",
+    fosun_api_key: "",
+    fosun_base_url: "",
+    fosun_sub_account_id: "",
+    fosun_client_id: "",
+    fosun_server_public_key: "",
+    fosun_client_private_key: "",
+    fosun_sdk_type: "",
+    fosun_apply_account_id: "",
+    fosun_option_apply_account_id: "",
+    usmart_trade_host: "https://open-jy.yxzq.com",
+    usmart_quote_host: "https://open-hz.yxzq.com:8443",
+    usmart_x_lang: "1",
+    usmart_x_channel: "",
+    usmart_area_code: "86",
+    usmart_phone_number: "",
+    usmart_login_password: "",
+    usmart_trade_password: "",
+    usmart_server_public_key: "",
+    usmart_client_private_key: "",
+    usmart_timeout_seconds: "8",
     is_default: true,
     overwrite: true,
   });
@@ -410,6 +504,7 @@ export default function SetupPage() {
     polygon_api_key: "",
     twelve_data_api_key: "",
     fred_api_key: "",
+    fmp_api_key: "",
     coingecko_api_key: "",
     openclaw_mcp_max_level: "",
     openclaw_mcp_allow_l3: "",
@@ -443,7 +538,7 @@ export default function SetupPage() {
   });
   const taDraft = {
     enabled: form.tradingagents_enabled || status?.values?.tradingagents_enabled || "false",
-    timeoutSeconds: form.tradingagents_timeout_seconds || status?.values?.tradingagents_timeout_seconds || "25",
+    timeoutSeconds: form.tradingagents_timeout_seconds || status?.values?.tradingagents_timeout_seconds || "180",
     maxSymbols: form.tradingagents_max_symbols || status?.values?.tradingagents_max_symbols || "3",
     provider: form.tradingagents_llm_provider || status?.values?.tradingagents_llm_provider || "openai",
     deepModel: form.tradingagents_deep_model || status?.values?.tradingagents_deep_model || "gpt-5.4",
@@ -513,7 +608,7 @@ export default function SetupPage() {
   )[String(taDraft.provider || "").toLowerCase()] || "";
 
   const applyFeeBrokersMeta = (br: FeeBrokersResponse) => {
-    const brokers = br.brokers || [];
+    const brokers = mergeBrokerOptions(br.brokers || []);
     setFeeBrokers(brokers);
     const ids = brokers.map((b) => b.broker_id);
     const rawEff = String(br.effective_broker_id || br.active_broker_id || "");
@@ -665,6 +760,7 @@ export default function SetupPage() {
         polygon_api_key: "",
         twelve_data_api_key: "",
         fred_api_key: "",
+        fmp_api_key: "",
         coingecko_api_key: "",
         openclaw_mcp_max_level: "",
         openclaw_mcp_allow_l3: "",
@@ -717,7 +813,12 @@ export default function SetupPage() {
       } else if (!enabled) {
         setMsg("OpenBB 当前未启用，请先保存 OPENBB_ENABLED=true。");
       } else {
-        setMsg(`OpenBB 已启用但连接失败（${base}），请确认服务是否启动。`);
+        const reason = String(r?.health?.autostart?.reason || r?.health?.reason || "service_unreachable");
+        const hint =
+          reason === "openbb_command_not_found"
+            ? "客户版未预置 OpenBB API 服务；请单独启动 OpenBB API，或由管理员重新打包含 OpenBB 运行环境。"
+            : "请确认 OpenBB API 服务是否启动，并检查 OPENBB_BASE_URL。";
+        setMsg(`OpenBB 已启用但连接失败（${base}，原因：${reason}）。${hint}`);
       }
       setErr("");
     } catch (e: any) {
@@ -727,7 +828,60 @@ export default function SetupPage() {
     }
   };
 
+  const refreshOpenbbDiagnostics = async () => {
+    const r = await apiGet<any>("/research/external/openbb/diagnostics", { cacheTtlMs: 0, retries: 0, timeoutMs: 90000 });
+    const diag = r?.diagnostics || null;
+    setOpenbbDiagnostics(diag);
+    return diag;
+  };
+
+  const testOpenbbDiagnostics = async () => {
+    setTestingOpenbb(true);
+    try {
+      const diag = await refreshOpenbbDiagnostics();
+      const health = diag?.health || {};
+      const enabled = Boolean(diag?.enabled ?? health?.enabled);
+      const ok = Boolean(health?.ok);
+      const base = diag?.base_url || health?.base_url || status?.values?.openbb_base_url || "未配置";
+      if (enabled && ok) {
+        setMsg(`OpenBB 连接正常：${base}`);
+      } else if (!enabled) {
+        setMsg("OpenBB 当前未启用，请先保存 OPENBB_ENABLED=true。");
+      } else {
+        const reason = String(health?.autostart?.reason || health?.reason || "service_unreachable");
+        setMsg(`OpenBB 已启用但连接失败：${base}，原因：${openbbReasonText(reason)}。`);
+      }
+      setErr("");
+    } catch (e: any) {
+      setErr(String(e.message || e));
+    } finally {
+      setTestingOpenbb(false);
+    }
+  };
+
+  const restartOpenbb = async () => {
+    setRestartingOpenbb(true);
+    try {
+      const r = await apiPost<any>("/research/external/openbb/restart", { clear_cache: true }, { cacheTtlMs: 0, retries: 0, timeoutMs: 120000 });
+      await refreshOpenbbDiagnostics();
+      if (r?.restart?.ok) {
+        setMsg("OpenBB 已重启，并已清理 OpenBB research cache。");
+      } else {
+        setMsg(`OpenBB 重启未完成：${openbbReasonText(r?.restart?.reason || "openbb_restart_failed")}`);
+      }
+      setErr("");
+    } catch (e: any) {
+      setErr(String(e.message || e));
+    } finally {
+      setRestartingOpenbb(false);
+    }
+  };
+
   const installCnProvider = async (provider: "mootdx" | "akshare" | "tushare" | "baostock" | "all") => {
+    if (IS_CUSTOMER_BUILD) {
+      setErr("客户版不支持运行时安装 Python 数据源包；请使用安装包内置数据源，或由管理员重新打包含所需数据源。");
+      return;
+    }
     setInstallingCnProvider(provider);
     setErr("");
     try {
@@ -753,7 +907,27 @@ export default function SetupPage() {
   };
 
   const cnProviderById = (id: string) => cnProviderStatus?.providers?.find((p) => p.id === id);
+  const cnProviderStatusLabel = (p?: { installed?: boolean; configured?: boolean; enabled?: boolean; status_text?: string }) => {
+    if (!p) return "检测中";
+    if (!p.installed && !p.configured) return "未预置";
+    if (!p.enabled) return "已停用";
+    return p.status_text || "可用";
+  };
+  const cnProviderStatusHelp = (id: string, p?: { installed?: boolean; configured?: boolean; enabled?: boolean; setup_hint?: string }) => {
+    if (IS_CUSTOMER_BUILD && !p?.installed && !p?.configured) {
+      return `${id} 未随客户安装包预置，客户版不能在线安装 Python 包；请使用 local_cache/Tencent/EastMoney，或让管理员重新打包。`;
+    }
+    const tokenReady = Boolean(status?.values?.tushare_token);
+    if (id === "tushare" && p?.installed && !tokenReady) {
+      return "Tushare Pro 已预置，但需要填写 TUSHARE_TOKEN 后保存。";
+    }
+    if (p?.installed && p?.enabled === false) {
+      return "包已预置，但当前 owner 的启用开关为 false；改为 true 并保存后刷新状态。";
+    }
+    return p?.setup_hint || "读取后端检测结果。";
+  };
   const cnInstallButtonLabel = (id: "mootdx" | "akshare" | "tushare" | "baostock", title: string) => {
+    if (IS_CUSTOMER_BUILD) return "客户版不支持在线安装";
     if (installingCnProvider === id) return "安装中...";
     if (cnInstallRestartHint[id]) return "已安装，建议重启";
     const provider = cnProviderById(id);
@@ -772,22 +946,8 @@ export default function SetupPage() {
     }
   };
 
-  const startServices = async () => {
-    setStarting(true);
-    try {
-      await apiPost("/setup/services/start", { start_feishu_bot: true, enable_auto_trader: true });
-      setMsg("服务启动命令已发送。");
-      await load();
-      setErr("");
-    } catch (e: any) {
-      setErr(String(e.message || e));
-    } finally {
-      setStarting(false);
-    }
-  };
-
   const stopAllServices = async () => {
-    const ok = confirm("确认停止前端和后端服务吗？这会关闭当前页面连接。");
+    const ok = confirm("确认关闭 MultiTrading 系统吗？这会停止前端和后端服务，当前页面连接会断开。");
     if (!ok) return;
     setStoppingAll(true);
     try {
@@ -797,7 +957,7 @@ export default function SetupPage() {
         stop_feishu_bot: true,
         stop_auto_trader: true,
       });
-      setMsg("停止命令已发送，页面可能即将断开。");
+      setMsg("关闭系统命令已发送，页面可能即将断开。");
       setErr("");
       // 不调用 load()，因为后端会自停，避免无意义报错闪烁。
     } catch (e: any) {
@@ -926,6 +1086,77 @@ export default function SetupPage() {
     }
   };
 
+  const generateFosunClientKeyPair = async () => {
+    if (!window.crypto?.subtle) {
+      setErr("当前浏览器不支持 WebCrypto，无法在页面内生成 RSA 密钥。请用 openssl 生成后再粘贴。");
+      return;
+    }
+    if (
+      accountForm.fosun_client_private_key.trim() &&
+      !window.confirm("这会覆盖当前填写的 FSOPENAPI_CLIENT_PRIVATE_KEY_PEM，确认继续？")
+    ) {
+      return;
+    }
+    try {
+      setGeneratingFosunKeyPair(true);
+      const keyPair = await window.crypto.subtle.generateKey(
+        {
+          name: "RSASSA-PKCS1-v1_5",
+          modulusLength: 2048,
+          publicExponent: new Uint8Array([1, 0, 1]),
+          hash: "SHA-256",
+        },
+        true,
+        ["sign", "verify"],
+      );
+      const [privateKey, publicKey] = await Promise.all([
+        window.crypto.subtle.exportKey("pkcs8", keyPair.privateKey),
+        window.crypto.subtle.exportKey("spki", keyPair.publicKey),
+      ]);
+      const privatePem = pemFromArrayBuffer("PRIVATE KEY", privateKey);
+      const publicPem = pemFromArrayBuffer("PUBLIC KEY", publicKey);
+      setAccountForm((s) => ({ ...s, fosun_client_private_key: privatePem }));
+      setFosunClientPublicKey(publicPem);
+      setMsg("已在本地浏览器生成复兴客户端密钥对。私钥已填入表单，公钥请提交给复兴绑定。");
+      setErr("");
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setGeneratingFosunKeyPair(false);
+    }
+  };
+
+  const copyText = async (text: string, successMessage: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setMsg(successMessage);
+      setErr("");
+    } catch (e: any) {
+      setErr(`复制失败：${String(e?.message || e)}`);
+    }
+  };
+
+  const refreshPublicIp = async () => {
+    try {
+      setPublicIpLoading(true);
+      const r = await apiGet<{ ok?: boolean; ip?: string; source?: string; error?: string }>("/setup/public-ip", {
+        cacheTtlMs: 0,
+      });
+      setPublicIpInfo({ ip: r.ip || "", source: r.source || "", error: r.error || "" });
+      if (!r.ip) {
+        setErr(r.error || "公网 IP 查询失败，请稍后重试。");
+      } else {
+        setErr("");
+      }
+    } catch (e: any) {
+      const error = String(e?.message || e);
+      setPublicIpInfo({ ip: "", source: "", error });
+      setErr(error);
+    } finally {
+      setPublicIpLoading(false);
+    }
+  };
+
   const deleteFeeBrokerProfile = async () => {
     if (!feeEditingBrokerId || feeBrokers.length <= 1) return;
     const label = feeBrokers.find((b) => b.broker_id === feeEditingBrokerId)?.display_name || feeEditingBrokerId;
@@ -967,7 +1198,11 @@ export default function SetupPage() {
 
   const probeLongPort = async () => {
     try {
-      const dg = await apiGet<LongPortDiag>("/setup/longport/diagnostics?probe=true");
+      const dg = await apiGet<LongPortDiag>("/setup/longport/diagnostics?probe=true", {
+        timeoutMs: 45000,
+        retries: 0,
+        cacheTtlMs: 0,
+      });
       setDiag(dg);
       setErr("");
     } catch (e: any) {
@@ -1011,6 +1246,34 @@ export default function SetupPage() {
           token_path: accountForm.tiger_token_path.trim(),
         };
       }
+      if (brokerProvider === "fosun" || brokerProvider === "fosunwealth") {
+        payload.credentials = {
+          api_key: accountForm.fosun_api_key.trim(),
+          base_url: accountForm.fosun_base_url.trim(),
+          sub_account_id: accountForm.fosun_sub_account_id.trim(),
+          client_id: accountForm.fosun_client_id.trim(),
+          server_public_key: accountForm.fosun_server_public_key.trim(),
+          client_private_key: accountForm.fosun_client_private_key.trim(),
+          sdk_type: accountForm.fosun_sdk_type.trim(),
+          apply_account_id: accountForm.fosun_apply_account_id.trim(),
+          option_apply_account_id: accountForm.fosun_option_apply_account_id.trim(),
+        };
+      }
+      if (brokerProvider === "usmart") {
+        payload.credentials = {
+          trade_host: accountForm.usmart_trade_host.trim(),
+          quote_host: accountForm.usmart_quote_host.trim(),
+          x_lang: accountForm.usmart_x_lang.trim() || "1",
+          x_channel: accountForm.usmart_x_channel.trim(),
+          area_code: accountForm.usmart_area_code.trim() || "86",
+          phone_number: accountForm.usmart_phone_number.trim(),
+          login_password: accountForm.usmart_login_password,
+          trade_password: accountForm.usmart_trade_password,
+          server_public_key: accountForm.usmart_server_public_key.trim(),
+          client_private_key: accountForm.usmart_client_private_key.trim(),
+          timeout_seconds: accountForm.usmart_timeout_seconds.trim(),
+        };
+      }
       await apiPost("/setup/accounts/register", payload);
       setMsg(`账户 ${payload.account_id} 已注册。`);
       setErr("");
@@ -1026,6 +1289,21 @@ export default function SetupPage() {
         tiger_props_path: "",
         tiger_secret_key: "",
         tiger_token_path: "",
+        fosun_api_key: "",
+        fosun_base_url: "",
+        fosun_sub_account_id: "",
+        fosun_client_id: "",
+        fosun_server_public_key: "",
+        fosun_client_private_key: "",
+        fosun_sdk_type: "",
+        fosun_apply_account_id: "",
+        fosun_option_apply_account_id: "",
+        usmart_x_channel: "",
+        usmart_phone_number: "",
+        usmart_login_password: "",
+        usmart_trade_password: "",
+        usmart_server_public_key: "",
+        usmart_client_private_key: "",
       }));
       const latest = await apiGet<SetupAccountsResponse>("/setup/accounts");
       setAccountsResp(latest);
@@ -1045,7 +1323,7 @@ export default function SetupPage() {
       const resp = await apiPost<any>(
         `/setup/accounts/${encodeURIComponent(aid)}/connect`,
         {},
-        { timeoutMs: 15000, retries: 0 }
+        { timeoutMs: 45000, retries: 0 }
       );
       const processes = Array.isArray(resp?.auto_stopped_processes)
         ? resp.auto_stopped_processes
@@ -1098,6 +1376,43 @@ export default function SetupPage() {
       }
       setErr("");
       const latest = await apiGet<SetupAccountsResponse>("/setup/accounts");
+      setAccountsResp(latest);
+      await refreshFeeBrokersMeta().catch(() => {});
+    } catch (e: any) {
+      setErr(String(e.message || e));
+    } finally {
+      setAccountActionLoading((s) => ({ ...s, [aid]: undefined }));
+    }
+  };
+
+  const deleteAccount = async (accountId: string, brokerProvider?: string) => {
+    const aid = String(accountId || "").trim();
+    if (!aid) return;
+    const broker = String(brokerProvider || "").trim();
+    const label = broker ? `${aid} / ${broker}` : aid;
+    if (!window.confirm(`确定删除券商账户 ${label}？本地保存的该账户 API 密钥也会从账户列表中移除。`)) return;
+    setAccountActionLoading((s) => ({ ...s, [aid]: "delete" }));
+    try {
+      const resp = await apiDelete<any>(`/setup/accounts/${encodeURIComponent(aid)}`, {
+        timeoutMs: 30000,
+        retries: 0,
+      });
+      const processes = Array.isArray(resp?.auto_stopped_processes)
+        ? resp.auto_stopped_processes
+        : Array.isArray(resp?.auto_stopped_workers)
+          ? resp.auto_stopped_workers
+          : [];
+      const stoppedNames = processes
+        .filter((x: any) => String(x?.stop_status || "").startsWith("stopped"))
+        .map((x: any) => String(x?.process || x?.worker || ""))
+        .filter(Boolean);
+      setMsg(
+        stoppedNames.length
+          ? `账户 ${aid} 已删除，并已停止相关自动交易进程：${stoppedNames.join(", ")}`
+          : `账户 ${aid} 已删除。`
+      );
+      setErr("");
+      const latest = await apiGet<SetupAccountsResponse>("/setup/accounts", { cacheTtlMs: 0 });
       setAccountsResp(latest);
       await refreshFeeBrokersMeta().catch(() => {});
     } catch (e: any) {
@@ -1201,8 +1516,8 @@ export default function SetupPage() {
     risk: {
       tone: riskEnabled && serviceRunning ? "ready" : riskEnabled ? "attention" : "neutral",
       label: riskEnabled ? (serviceRunning ? "运行中" : "风控已开") : "风控关闭",
-      detail: "风控参数与 Feishu Bot / Auto Trader 服务启停。",
-      nextStep: riskEnabled ? "确认最大订单金额和单日损失阈值，再启动服务。" : "建议启用风控后再启动自动交易相关服务。",
+      detail: "风控参数与系统服务状态；飞书在通知中心管理，自动交易在自动交易页面管理。",
+      nextStep: riskEnabled ? "确认最大订单金额和单日损失阈值；如需飞书通知请去通知中心管理。" : "建议先启用风控，再开启自动交易相关模块。",
       metrics: [
         { label: "风控", value: riskEnabled ? "已启用" : "未启用", tone: riskEnabled ? "ready" : "attention" },
         { label: "Feishu Bot", value: services?.feishu_bot_running ? "运行中" : "未运行", tone: services?.feishu_bot_running ? "ready" : "neutral" },
@@ -1236,7 +1551,7 @@ export default function SetupPage() {
         : activeSection === "research"
           ? [
               { label: saving ? "保存中..." : "保存数据源配置", onClick: saveSecrets, disabled: saving, variant: "primary" },
-              { label: testingOpenbb ? "测试中..." : "测试 OpenBB", onClick: testOpenbb, disabled: testingOpenbb },
+              { label: testingOpenbb ? "测试中..." : "测试 OpenBB", onClick: testOpenbbDiagnostics, disabled: testingOpenbb },
             ]
           : activeSection === "agents"
             ? [
@@ -1250,8 +1565,7 @@ export default function SetupPage() {
               : activeSection === "risk"
                 ? [
                     { label: "保存风控参数", onClick: saveRisk, disabled: !risk, variant: "primary" },
-                    { label: starting ? "启动中..." : "启动服务", onClick: startServices, disabled: starting },
-                    { label: stoppingAll ? "停止中..." : "停止全部", onClick: stopAllServices, disabled: stoppingAll },
+                    { label: stoppingAll ? "关闭中..." : "关闭系统", onClick: stopAllServices, disabled: stoppingAll },
                   ]
                 : [
                     { label: saving ? "保存中..." : "保存高级设置", onClick: saveSecrets, disabled: saving, variant: "primary" },
@@ -1472,20 +1786,27 @@ export default function SetupPage() {
                     </td>
                     <td className="px-3 py-2 text-rose-300">{ac.last_error || "-"}</td>
                     <td className="px-3 py-2">
-                      <div className="flex gap-2">
+                      <div className="flex flex-wrap gap-2">
                         <button
                           className="btn-secondary px-2 py-1 text-xs"
                           onClick={() => connectAccount(ac.account_id)}
-                          disabled={accountActionLoading[ac.account_id] === "connect" || (!ac.manual_disconnected && ac.quote_ready && ac.trade_ready)}
+                          disabled={!!accountActionLoading[ac.account_id] || (!ac.manual_disconnected && ac.quote_ready && ac.trade_ready)}
                         >
                           {accountActionLoading[ac.account_id] === "connect" ? "连接中..." : "连接"}
                         </button>
                         <button
                           className="btn-secondary px-2 py-1 text-xs"
                           onClick={() => disconnectAccount(ac.account_id)}
-                          disabled={accountActionLoading[ac.account_id] === "disconnect" || !!ac.manual_disconnected}
+                          disabled={!!accountActionLoading[ac.account_id] || !!ac.manual_disconnected}
                         >
                           {accountActionLoading[ac.account_id] === "disconnect" ? "断开中..." : "断开"}
+                        </button>
+                        <button
+                          className="btn-secondary border-rose-500/40 px-2 py-1 text-xs text-rose-200"
+                          onClick={() => deleteAccount(ac.account_id, ac.broker_provider)}
+                          disabled={!!accountActionLoading[ac.account_id]}
+                        >
+                          {accountActionLoading[ac.account_id] === "delete" ? "删除中..." : "删除"}
                         </button>
                       </div>
                     </td>
@@ -1598,45 +1919,49 @@ export default function SetupPage() {
               覆盖同名
             </label>
           </div>
-          <SecretInputWithLink
-            label="申请 Longbridge OpenAPI"
-            href={externalCredentialLinks.longbridgeOpenApi}
-            input={
-              <input
-                className="input-base"
-                type="password"
-                placeholder="LONGPORT_APP_KEY（可留空，回退环境配置）"
-                value={accountForm.longport_app_key}
-                onChange={(e) => setAccountForm((s) => ({ ...s, longport_app_key: e.target.value }))}
+          {["longbridge", "longport"].includes(accountForm.broker_provider.trim().toLowerCase()) ? (
+            <>
+              <SecretInputWithLink
+                label="申请 Longbridge OpenAPI"
+                href={externalCredentialLinks.longbridgeOpenApi}
+                input={
+                  <input
+                    className="input-base"
+                    type="password"
+                    placeholder="LONGPORT_APP_KEY（可留空，回退环境配置）"
+                    value={accountForm.longport_app_key}
+                    onChange={(e) => setAccountForm((s) => ({ ...s, longport_app_key: e.target.value }))}
+                  />
+                }
               />
-            }
-          />
-          <SecretInputWithLink
-            label="申请 Longbridge OpenAPI"
-            href={externalCredentialLinks.longbridgeOpenApi}
-            input={
-              <input
-                className="input-base"
-                type="password"
-                placeholder="LONGPORT_APP_SECRET（可留空，回退环境配置）"
-                value={accountForm.longport_app_secret}
-                onChange={(e) => setAccountForm((s) => ({ ...s, longport_app_secret: e.target.value }))}
+              <SecretInputWithLink
+                label="申请 Longbridge OpenAPI"
+                href={externalCredentialLinks.longbridgeOpenApi}
+                input={
+                  <input
+                    className="input-base"
+                    type="password"
+                    placeholder="LONGPORT_APP_SECRET（可留空，回退环境配置）"
+                    value={accountForm.longport_app_secret}
+                    onChange={(e) => setAccountForm((s) => ({ ...s, longport_app_secret: e.target.value }))}
+                  />
+                }
               />
-            }
-          />
-          <SecretInputWithLink
-            label="申请 Longbridge OpenAPI"
-            href={externalCredentialLinks.longbridgeOpenApi}
-            input={
-              <input
-                className="input-base"
-                type="password"
-                placeholder="LONGPORT_ACCESS_TOKEN（可留空，回退环境配置）"
-                value={accountForm.longport_access_token}
-                onChange={(e) => setAccountForm((s) => ({ ...s, longport_access_token: e.target.value }))}
+              <SecretInputWithLink
+                label="申请 Longbridge OpenAPI"
+                href={externalCredentialLinks.longbridgeOpenApi}
+                input={
+                  <input
+                    className="input-base"
+                    type="password"
+                    placeholder="LONGPORT_ACCESS_TOKEN（可留空，回退环境配置）"
+                    value={accountForm.longport_access_token}
+                    onChange={(e) => setAccountForm((s) => ({ ...s, longport_access_token: e.target.value }))}
+                  />
+                }
               />
-            }
-          />
+            </>
+          ) : null}
           {["tiger", "itiger"].includes(accountForm.broker_provider.trim().toLowerCase()) ? (
             <div className="grid gap-2 rounded border border-slate-700/70 bg-slate-950/40 p-3">
               <div className="flex items-center justify-between gap-2">
@@ -1701,6 +2026,211 @@ export default function SetupPage() {
                 value={accountForm.tiger_token_path}
                 onChange={(e) => setAccountForm((s) => ({ ...s, tiger_token_path: e.target.value }))}
               />
+            </div>
+          ) : null}
+          {["fosun", "fosunwealth"].includes(accountForm.broker_provider.trim().toLowerCase()) ? (
+            <div className="grid gap-2 rounded border border-slate-700/70 bg-slate-950/40 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-medium text-slate-300">复兴证券 OpenAPI</div>
+                <CredentialLink href={externalCredentialLinks.fosunOpenApi}>查看复兴 API 文档</CredentialLink>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 rounded border border-cyan-500/20 bg-cyan-500/5 p-3">
+                <button
+                  type="button"
+                  className="btn-secondary px-3 py-2 text-xs"
+                  onClick={() => void refreshPublicIp()}
+                  disabled={publicIpLoading}
+                >
+                  {publicIpLoading ? "查询 IP 中..." : "查询公网 IP"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary px-3 py-2 text-xs"
+                  onClick={() => void generateFosunClientKeyPair()}
+                  disabled={generatingFosunKeyPair}
+                >
+                  {generatingFosunKeyPair ? "生成中..." : "生成客户端密钥对"}
+                </button>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[11px] text-slate-400">后端出口公网 IP（提交给复兴 IP 白名单）</div>
+                  <div className="mt-1 font-mono text-sm text-cyan-100">{publicIpInfo?.ip || "未查询"}</div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    {publicIpInfo?.source ? `来源：${publicIpInfo.source}` : "云服务器部署时以服务器出口 IP 为准。"}
+                  </div>
+                  {publicIpInfo?.error ? <div className="mt-1 text-[11px] text-rose-300">{publicIpInfo.error}</div> : null}
+                </div>
+                <button
+                  type="button"
+                  className="btn-secondary px-3 py-2 text-xs"
+                  onClick={() => void copyText(publicIpInfo?.ip || "", "已复制公网 IP。")}
+                  disabled={!publicIpInfo?.ip}
+                >
+                  复制 IP
+                </button>
+              </div>
+              <input
+                className="input-base"
+                type="password"
+                placeholder="FSOPENAPI API Key"
+                value={accountForm.fosun_api_key}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_api_key: e.target.value }))}
+              />
+              <input
+                className="input-base"
+                placeholder="Base URL，例如 https://openapi-sit.fosunxcz.com"
+                value={accountForm.fosun_base_url}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_base_url: e.target.value }))}
+              />
+              <input
+                className="input-base"
+                placeholder="sub_account_id / 证券子账户号"
+                value={accountForm.fosun_sub_account_id}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_sub_account_id: e.target.value }))}
+              />
+              <input
+                className="input-base"
+                placeholder="client_id（可选）"
+                value={accountForm.fosun_client_id}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_client_id: e.target.value }))}
+              />
+              <textarea
+                className="input-base min-h-24"
+                placeholder="FSOPENAPI_SERVER_PUBLIC_KEY PEM"
+                value={accountForm.fosun_server_public_key}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_server_public_key: e.target.value }))}
+              />
+              <textarea
+                className="input-base min-h-24"
+                placeholder="FSOPENAPI_CLIENT_PRIVATE_KEY PEM"
+                value={accountForm.fosun_client_private_key}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_client_private_key: e.target.value }))}
+              />
+              {fosunClientPublicKey ? (
+                <div className="grid gap-2 rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-medium text-emerald-100">客户端公钥</div>
+                      <p className="mt-1 text-[11px] text-slate-500">把这段 PUBLIC KEY 提交给复兴绑定；私钥只保存在上方表单里。</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-secondary px-3 py-2 text-xs"
+                      onClick={() => void copyText(fosunClientPublicKey, "已复制复兴客户端公钥。")}
+                    >
+                      复制客户端公钥
+                    </button>
+                  </div>
+                  <textarea className="input-base min-h-24 font-mono text-xs" readOnly value={fosunClientPublicKey} />
+                </div>
+              ) : null}
+              <select
+                className="input-base"
+                value={accountForm.fosun_sdk_type}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_sdk_type: e.target.value }))}
+              >
+                <option value="">默认 /api</option>
+                <option value="ops">ops /api/ops</option>
+              </select>
+              <input
+                className="input-base"
+                placeholder="apply_account_id（可选，子账号/柜台账号）"
+                value={accountForm.fosun_apply_account_id}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_apply_account_id: e.target.value }))}
+              />
+              <input
+                className="input-base"
+                placeholder="option_apply_account_id（可选，期权子账户）"
+                value={accountForm.fosun_option_apply_account_id}
+                onChange={(e) => setAccountForm((s) => ({ ...s, fosun_option_apply_account_id: e.target.value }))}
+              />
+              <p className="text-xs leading-5 text-slate-500">
+                系统会在连接该账户时临时注入 SDK 所需 PEM 环境变量；不需要写入 Windows 全局环境变量。第一版已支持账户、行情、资金、持仓、订单、下单和撤单；期权链选择仍需后续单独适配。
+              </p>
+            </div>
+          ) : null}
+          {accountForm.broker_provider.trim().toLowerCase() === "usmart" ? (
+            <div className="grid gap-2 rounded border border-slate-700/70 bg-slate-950/40 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-medium text-slate-300">uSMART OpenAPI</div>
+                <CredentialLink href={externalCredentialLinks.usmartOpenApi}>查看 uSMART 官网</CredentialLink>
+              </div>
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                <input
+                  className="input-base"
+                  placeholder="trade_host，例如 https://open-jy.yxzq.com"
+                  value={accountForm.usmart_trade_host}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_trade_host: e.target.value }))}
+                />
+                <input
+                  className="input-base"
+                  placeholder="quote_host，例如 https://open-hz.yxzq.com:8443"
+                  value={accountForm.usmart_quote_host}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_quote_host: e.target.value }))}
+                />
+                <input
+                  className="input-base"
+                  placeholder="X-Channel 渠道号"
+                  value={accountForm.usmart_x_channel}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_x_channel: e.target.value }))}
+                  autoComplete="off"
+                />
+                <input
+                  className="input-base"
+                  placeholder="X-Lang，默认 1"
+                  value={accountForm.usmart_x_lang}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_x_lang: e.target.value }))}
+                />
+                <input
+                  className="input-base"
+                  placeholder="areaCode，默认 86"
+                  value={accountForm.usmart_area_code}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_area_code: e.target.value }))}
+                />
+                <input
+                  className="input-base"
+                  placeholder="phoneNumber"
+                  value={accountForm.usmart_phone_number}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_phone_number: e.target.value }))}
+                  autoComplete="off"
+                />
+                <input
+                  className="input-base"
+                  type="password"
+                  placeholder="login_password"
+                  value={accountForm.usmart_login_password}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_login_password: e.target.value }))}
+                  autoComplete="new-password"
+                />
+                <input
+                  className="input-base"
+                  type="password"
+                  placeholder="trade_password"
+                  value={accountForm.usmart_trade_password}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_trade_password: e.target.value }))}
+                  autoComplete="new-password"
+                />
+                <input
+                  className="input-base"
+                  placeholder="timeout_seconds，默认 8"
+                  value={accountForm.usmart_timeout_seconds}
+                  onChange={(e) => setAccountForm((s) => ({ ...s, usmart_timeout_seconds: e.target.value }))}
+                />
+              </div>
+              <textarea
+                className="input-base min-h-24 font-mono text-xs"
+                placeholder="uSMART 服务端 PUBLIC KEY PEM 或去掉头尾后的内容"
+                value={accountForm.usmart_server_public_key}
+                onChange={(e) => setAccountForm((s) => ({ ...s, usmart_server_public_key: e.target.value }))}
+              />
+              <textarea
+                className="input-base min-h-24 font-mono text-xs"
+                placeholder="uSMART 客户端 PRIVATE KEY PEM 或去掉头尾后的内容"
+                value={accountForm.usmart_client_private_key}
+                onChange={(e) => setAccountForm((s) => ({ ...s, usmart_client_private_key: e.target.value }))}
+              />
+              <p className="text-xs leading-5 text-slate-500">
+                根据本地 demo 接入：登录、交易解锁、实时行情、持仓、今日委托、股票下单和撤单已映射；期权链、期权报价和历史 K 线暂未映射，自动期权 worker 不应选择该券商。
+              </p>
             </div>
           ) : null}
         </div>
@@ -1849,6 +2379,11 @@ export default function SetupPage() {
             input={<input className="input-base" type="password" placeholder={`FRED_API_KEY (当前: ${status?.values.fred_api_key || "未配置"})`} value={form.fred_api_key} onChange={(e) => setForm((s) => ({ ...s, fred_api_key: e.target.value }))} />}
           />
           <SecretInputWithLink
+            label="申请 FMP API Key"
+            href={externalCredentialLinks.fmp}
+            input={<input className="input-base" type="password" placeholder={`FMP_API_KEY (当前: ${status?.values.fmp_api_key || "未配置"})`} value={form.fmp_api_key} onChange={(e) => setForm((s) => ({ ...s, fmp_api_key: e.target.value }))} />}
+          />
+          <SecretInputWithLink
             label="申请 CoinGecko API Key"
             href={externalCredentialLinks.coingecko}
             input={<input className="input-base" type="password" placeholder={`COINGECKO_API_KEY (当前: ${status?.values.coingecko_api_key || "未配置"})`} value={form.coingecko_api_key} onChange={(e) => setForm((s) => ({ ...s, coingecko_api_key: e.target.value }))} />}
@@ -1949,9 +2484,63 @@ export default function SetupPage() {
         <div className="text-xs text-slate-400">
           建议先启动 OpenBB API（默认 http://127.0.0.1:6900），再点击“测试 OpenBB 连接”。
         </div>
-        <button className="btn-secondary" onClick={testOpenbb} disabled={testingOpenbb}>
-          {testingOpenbb ? "测试中..." : "测试 OpenBB 连接"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button className="btn-secondary" onClick={testOpenbbDiagnostics} disabled={testingOpenbb || restartingOpenbb}>
+            {testingOpenbb ? "诊断中..." : "诊断 OpenBB"}
+          </button>
+          <button className="btn-secondary" onClick={restartOpenbb} disabled={testingOpenbb || restartingOpenbb}>
+            {restartingOpenbb ? "重启中..." : "重启 OpenBB 并清缓存"}
+          </button>
+        </div>
+        {openbbDiagnostics ? (
+          <div className="rounded-lg border border-slate-700/70 bg-slate-950/40 p-3 text-xs text-slate-300">
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+              <div>
+                <div className="text-slate-500">API</div>
+                <div className={openbbDiagnostics?.health?.ok ? "text-emerald-300" : "text-rose-300"}>{openbbOkText(openbbDiagnostics?.health?.ok)}</div>
+                <div className="truncate text-slate-400">{openbbDiagnostics?.base_url || "-"}</div>
+              </div>
+              <div>
+                <div className="text-slate-500">Process</div>
+                <div>{openbbDiagnostics?.process?.port_open ? "port open" : "port closed"}</div>
+                <div className="text-slate-400">PID: {(openbbDiagnostics?.process?.listener_pids || []).join(", ") || "-"}</div>
+              </div>
+              <div>
+                <div className="text-slate-500">Cache</div>
+                <div>{openbbDiagnostics?.cache?.enabled ? "enabled" : "disabled"}</div>
+                <div className="text-slate-400">entries: {openbbDiagnostics?.cache?.entries ?? 0}</div>
+              </div>
+              <div>
+                <div className="text-slate-500">Keys</div>
+                <div>FMP: {openbbDiagnostics?.capabilities?.credentials?.fmp?.configured ? "configured" : "-"}</div>
+                <div>FRED: {openbbDiagnostics?.capabilities?.credentials?.fred?.configured ? "configured" : "-"}</div>
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
+              {[
+                ["FMP profile", openbbDiagnostics?.capabilities?.fmp_profile],
+                ["FMP ETF holdings", openbbDiagnostics?.capabilities?.fmp_etf_holdings],
+                ["FMP ETF sectors", openbbDiagnostics?.capabilities?.fmp_etf_sectors],
+                ["SEC", openbbDiagnostics?.capabilities?.sec],
+                ["FRED", openbbDiagnostics?.capabilities?.fred],
+                ["CFTC", openbbDiagnostics?.capabilities?.cftc],
+              ].map(([label, item]: any) => (
+                <div key={label} className="rounded border border-slate-800/80 px-2 py-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>{label}</span>
+                    <span className={item?.ok ? "text-emerald-300" : "text-amber-300"}>{openbbOkText(item?.ok)}</span>
+                  </div>
+                  <div className="truncate text-slate-500">
+                    {openbbReasonText(item?.reason)}
+                    {typeof item?.count === "number" ? ` / count ${item.count}` : ""}
+                    {typeof item?.filings_count === "number" ? ` / filings ${item.filings_count}` : ""}
+                    {typeof item?.available_count === "number" ? ` / available ${item.available_count}` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="panel space-y-3">
@@ -1961,6 +2550,7 @@ export default function SetupPage() {
             type="button"
             className="btn-secondary"
             disabled={
+              IS_CUSTOMER_BUILD ||
               Boolean(installingCnProvider) ||
               (Boolean(cnProviderById("mootdx")?.installed) &&
                 Boolean(cnProviderById("akshare")?.installed) &&
@@ -1990,11 +2580,11 @@ export default function SetupPage() {
                         : "bg-amber-500/10 text-amber-200")
                     }
                   >
-                    {cnInstallRestartHint[id] ? "已安装，建议重启" : p?.status_text || "检测中"}
+                    {cnInstallRestartHint[id] ? "已安装，建议重启" : cnProviderStatusLabel(p)}
                   </span>
                 </div>
                 <div className="mt-1 text-[11px] leading-relaxed text-slate-500">
-                  {cnInstallRestartHint[id] ? "安装已完成；重启后端后状态会从运行环境重新检测。" : p?.setup_hint || "正在读取后端检测结果。"}
+                  {cnInstallRestartHint[id] ? "安装已完成；重启后端后状态会从运行环境重新检测。" : cnProviderStatusHelp(id, p)}
                 </div>
               </div>
             );
@@ -2013,7 +2603,7 @@ export default function SetupPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={Boolean(installingCnProvider) || Boolean(cnProviderById("mootdx")?.installed)}
+            disabled={IS_CUSTOMER_BUILD || Boolean(installingCnProvider) || Boolean(cnProviderById("mootdx")?.installed)}
             onClick={() => void installCnProvider("mootdx")}
           >
             {cnInstallButtonLabel("mootdx", "mootdx")}
@@ -2042,7 +2632,7 @@ export default function SetupPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={Boolean(installingCnProvider) || Boolean(cnProviderById("akshare")?.installed)}
+            disabled={IS_CUSTOMER_BUILD || Boolean(installingCnProvider) || Boolean(cnProviderById("akshare")?.installed)}
             onClick={() => void installCnProvider("akshare")}
           >
             {cnInstallButtonLabel("akshare", "AkShare")}
@@ -2059,7 +2649,7 @@ export default function SetupPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={Boolean(installingCnProvider) || Boolean(cnProviderById("tushare")?.installed)}
+            disabled={IS_CUSTOMER_BUILD || Boolean(installingCnProvider) || Boolean(cnProviderById("tushare")?.installed)}
             onClick={() => void installCnProvider("tushare")}
           >
             {cnInstallButtonLabel("tushare", "Tushare")}
@@ -2076,7 +2666,7 @@ export default function SetupPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={Boolean(installingCnProvider) || Boolean(cnProviderById("baostock")?.installed)}
+            disabled={IS_CUSTOMER_BUILD || Boolean(installingCnProvider) || Boolean(cnProviderById("baostock")?.installed)}
             onClick={() => void installCnProvider("baostock")}
           >
             {cnInstallButtonLabel("baostock", "BaoStock")}
@@ -2161,13 +2751,13 @@ export default function SetupPage() {
                 type="number"
                 min={1}
                 step={1}
-                placeholder={`当前: ${status?.values.tradingagents_timeout_seconds || "25"}`}
+                placeholder={`当前: ${status?.values.tradingagents_timeout_seconds || "180"}`}
                 value={taDraft.timeoutSeconds}
                 onChange={(e) => setForm((s) => ({ ...s, tradingagents_timeout_seconds: e.target.value }))}
               />
             ) : (
               <select className="input-base mt-1" value={taDraft.timeoutSeconds} onChange={(e) => setForm((s) => ({ ...s, tradingagents_timeout_seconds: e.target.value }))}>
-                <option value="10">10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option><option value="30">30</option><option value="45">45</option><option value="60">60</option><option value="90">90</option><option value="120">120</option>
+                <option value="60">60</option><option value="90">90</option><option value="120">120</option><option value="180">180</option><option value="240">240</option><option value="300">300</option>
               </select>
             )}
           </label>
@@ -2674,40 +3264,162 @@ export default function SetupPage() {
 
       {activeSection === "risk" ? (
         <>
-      <div className="panel space-y-3">
-        <div className="field-label">风控参数</div>
-        {risk ? (
-          <>
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-              <input className="input-base" type="number" value={risk.max_order_amount} onChange={(e) => setRisk({ ...risk, max_order_amount: Number(e.target.value) })} />
-              <input className="input-base" type="number" step="0.01" value={risk.max_daily_loss_pct} onChange={(e) => setRisk({ ...risk, max_daily_loss_pct: Number(e.target.value) })} />
-              <input className="input-base" type="number" step="0.01" value={risk.stop_loss_pct} onChange={(e) => setRisk({ ...risk, stop_loss_pct: Number(e.target.value) })} />
-              <input className="input-base" type="number" step="0.01" value={risk.max_position_pct} onChange={(e) => setRisk({ ...risk, max_position_pct: Number(e.target.value) })} />
-              <select className="input-base" value={risk.enabled ? "1" : "0"} onChange={(e) => setRisk({ ...risk, enabled: e.target.value === "1" })}>
-                <option value="1">风控启用</option>
-                <option value="0">风控关闭</option>
-              </select>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
+        <div className="panel space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="field-label">风控规则</div>
+              <p className="mt-1 text-sm text-slate-400">保存后作为自动交易的安全边界；保存参数不会启动飞书或自动交易。</p>
             </div>
-            <button className="btn-secondary" onClick={saveRisk}>保存风控参数</button>
-          </>
-        ) : (
-          <div className="text-sm text-slate-400">加载中...</div>
-        )}
-      </div>
-
-      <div className="panel space-y-2">
-        <div className="field-label">服务启动</div>
-        <div className="text-sm text-slate-300">
-          Feishu Bot：{services?.feishu_bot_running ? <span className="text-emerald-300">运行中</span> : <span className="text-slate-300">未运行</span>}
-          {" | "}
-          Auto Trader：{services?.auto_trader_scheduler_running ? <span className="text-emerald-300">运行中</span> : <span className="text-slate-300">未运行</span>}
+            <span className={`rounded-full border px-3 py-1 text-sm font-semibold ${
+              risk?.enabled
+                ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-200"
+                : "border-amber-400/40 bg-amber-500/10 text-amber-200"
+            }`}>
+              {risk?.enabled ? "风控已启用" : "风控关闭"}
+            </span>
+          </div>
+          {risk ? (
+            <>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">单笔最大金额</span>
+                  <input className="input-base" type="number" value={risk.max_order_amount} onChange={(e) => setRisk({ ...risk, max_order_amount: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">超过该金额的订单会被拦截。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">单日最大亏损比例</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_daily_loss_pct} onChange={(e) => setRisk({ ...risk, max_daily_loss_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">例如 0.2 表示 20%。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">单笔止损比例</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.stop_loss_pct} onChange={(e) => setRisk({ ...risk, stop_loss_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">用于自动交易的基础止损边界。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">单仓最大占比</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_position_pct} onChange={(e) => setRisk({ ...risk, max_position_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">限制单个持仓占账户的比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">账户现金底线</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.min_cash_ratio ?? 0.2} onChange={(e) => setRisk({ ...risk, min_cash_ratio: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">例如 0.2 表示下单后保留 20% 现金/购买力。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">账户总风险上限</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_total_risk_pct ?? 0.1} onChange={(e) => setRisk({ ...risk, max_total_risk_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">所有自动交易合计风险暴露上限。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">股票单笔账户占比</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_stock_order_notional_pct ?? 0.03} onChange={(e) => setRisk({ ...risk, max_stock_order_notional_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">股票单笔名义金额占账户净值上限。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">股票单标的账户占比</span>
+                  <input className="input-base" type="number" step="0.01" value={risk.max_stock_position_pct ?? 0.1} onChange={(e) => setRisk({ ...risk, max_stock_position_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">股票买入后单标的市值占账户净值上限。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">期权单笔最大亏损</span>
+                  <input className="input-base" type="number" step="0.001" value={risk.max_option_order_loss_pct ?? 0.005} onChange={(e) => setRisk({ ...risk, max_option_order_loss_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">普通期权单笔最大可亏损占账户净值比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">0DTE 单笔最大亏损</span>
+                  <input className="input-base" type="number" step="0.001" value={risk.max_0dte_order_loss_pct ?? 0.002} onChange={(e) => setRisk({ ...risk, max_0dte_order_loss_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">0DTE 单笔最大可亏损占账户净值比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">期权当日新增风险</span>
+                  <input className="input-base" type="number" step="0.001" value={risk.max_option_daily_new_risk_pct ?? 0.015} onChange={(e) => setRisk({ ...risk, max_option_daily_new_risk_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">当天新开期权最大风险占账户净值比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">期权总风险暴露</span>
+                  <input className="input-base" type="number" step="0.001" value={risk.max_total_option_risk_pct ?? 0.05} onChange={(e) => setRisk({ ...risk, max_total_option_risk_pct: Number(e.target.value) })} />
+                  <span className="block text-[11px] text-slate-500">全部未平期权风险占账户净值比例。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">禁止裸卖期权</span>
+                  <select className="input-base" value={(risk.block_naked_short_options ?? true) ? "1" : "0"} onChange={(e) => setRisk({ ...risk, block_naked_short_options: e.target.value === "1" })}>
+                    <option value="1">禁止自动裸卖</option>
+                    <option value="0">允许策略自行控制</option>
+                  </select>
+                  <span className="block text-[11px] text-slate-500">建议保持禁止，裸卖期权应单独人工审批。</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-slate-400">实盘缺数据时</span>
+                  <select className="input-base" value={(risk.fail_closed_for_live ?? true) ? "1" : "0"} onChange={(e) => setRisk({ ...risk, fail_closed_for_live: e.target.value === "1" })}>
+                    <option value="1">拦截下单</option>
+                    <option value="0">仅记录告警</option>
+                  </select>
+                  <span className="block text-[11px] text-slate-500">账户净值或持仓不可用时的总风控行为。</span>
+                </label>
+                <label className="space-y-1 md:col-span-2 xl:col-span-1">
+                  <span className="text-xs font-medium text-slate-400">风控总开关</span>
+                  <select className="input-base" value={risk.enabled ? "1" : "0"} onChange={(e) => setRisk({ ...risk, enabled: e.target.value === "1" })}>
+                    <option value="1">启用风控</option>
+                    <option value="0">关闭风控</option>
+                  </select>
+                  <span className="block text-[11px] text-slate-500">建议先启用风控，再到自动交易页面启动具体 worker。</span>
+                </label>
+              </div>
+              <div className={`rounded-xl border px-4 py-3 text-sm ${
+                risk.enabled
+                  ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-100"
+                  : "border-amber-500/25 bg-amber-500/10 text-amber-100"
+              }`}>
+                {risk.enabled
+                  ? "当前风控会参与自动交易下单前检查。"
+                  : "当前风控未启用：自动交易仍可单独运行，但缺少总闸保护。"}
+              </div>
+              <button className="btn-secondary" onClick={saveRisk}>保存风控参数</button>
+            </>
+          ) : (
+            <div className="text-sm text-slate-400">加载中...</div>
+          )}
         </div>
-        <button className="btn-primary" onClick={startServices} disabled={starting}>
-          {starting ? "启动中..." : "一键启动服务"}
-        </button>
-        <button className="btn-secondary" onClick={stopAllServices} disabled={stoppingAll}>
-          {stoppingAll ? "停止中..." : "停止前后端服务"}
-        </button>
+
+        <div className="panel space-y-4">
+          <div>
+            <div className="field-label">服务状态与系统关闭</div>
+            <p className="mt-1 text-sm text-slate-400">这里只显示服务状态和关闭系统入口；飞书与自动交易分别在各自页面管理。</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+            <div className="rounded-xl border border-slate-700/70 bg-slate-950/40 p-4">
+              <div className="text-sm text-slate-400">Feishu Bot</div>
+              <div className={`mt-1 text-xl font-semibold ${services?.feishu_bot_running ? "text-emerald-300" : "text-slate-200"}`}>
+                {services?.feishu_bot_running ? "运行中" : "未运行"}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">用于飞书通知、指令和收款确认。</div>
+              <Link className="mt-3 inline-flex text-sm font-semibold text-cyan-200 hover:text-cyan-100" href="/notifications">
+                去通知中心管理飞书
+              </Link>
+            </div>
+            <div className="rounded-xl border border-slate-700/70 bg-slate-950/40 p-4">
+              <div className="text-sm text-slate-400">Auto Trader</div>
+              <div className={`mt-1 text-xl font-semibold ${services?.auto_trader_scheduler_running ? "text-emerald-300" : "text-slate-200"}`}>
+                {services?.auto_trader_scheduler_running ? "运行中" : "未运行"}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">用于自动扫描、生成信号和执行交易流程。</div>
+              <Link className="mt-3 inline-flex text-sm font-semibold text-cyan-200 hover:text-cyan-100" href="/auto-trader">
+                去自动交易页面管理
+              </Link>
+            </div>
+          </div>
+          <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
+            推荐顺序：先保存并启用风控，再到通知中心启动飞书，到自动交易页面启动具体交易模块。
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button className="btn-secondary border-rose-500/40 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20" onClick={stopAllServices} disabled={stoppingAll}>
+              {stoppingAll ? "关闭中..." : "关闭系统"}
+            </button>
+          </div>
+          <p className="text-xs text-rose-200/80">关闭系统会停止前端和后端服务，当前页面会断开；不会删除任何已保存配置。</p>
+        </div>
       </div>
         </>
       ) : null}

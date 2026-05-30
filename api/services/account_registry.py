@@ -415,6 +415,35 @@ class AccountRegistry:
             self._persist_owner(rec.owner_id)
         return rec
 
+    def delete_account(self, account_id: str, owner_id: str | None = None) -> AccountRecord:
+        owner, aid = self._resolve_account_id(account_id, owner_id=owner_id)
+        with self._lock:
+            self._load_owner_from_disk_locked(owner)
+            owner_accounts = self._accounts.setdefault(owner, {})
+            rec = owner_accounts.get(aid)
+            if rec is None:
+                raise ValueError(f"account_not_found: {aid}")
+            with rec.lock:
+                _unbind_and_close_contexts(rec)
+                rec.quote_ctx = None
+                rec.trade_ctx = None
+                rec.status = "deleted"
+                rec.manual_disconnected = True
+                rec.last_error = None
+                rec.last_reset_ts = time.time()
+            del owner_accounts[aid]
+
+            current_default = self._default_account_ids.get(owner)
+            if owner_accounts:
+                next_default = current_default if current_default in owner_accounts else next(iter(owner_accounts.keys()))
+                self._default_account_ids[owner] = next_default
+                for key, other in owner_accounts.items():
+                    other.is_default = key == next_default
+            else:
+                self._default_account_ids.pop(owner, None)
+        self._persist_owner(owner)
+        return rec
+
     def has_connected_account(self, owner_id: str | None = None) -> bool:
         owner = self._normalize_owner_id(owner_id)
         with self._lock:
