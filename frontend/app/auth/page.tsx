@@ -10,6 +10,23 @@ import { PageShell } from "@/components/ui/page-shell";
 
 type Mode = "login" | "register";
 
+function friendlyAuthError(raw: unknown, mode: Mode): string {
+  const text = String(raw || "").trim();
+  if (mode === "login" && (text.includes("invalid_username_or_password") || text.includes("用户名或密码不正确"))) {
+    return "用户名或密码不正确。若这是升级、重装或迁移后的本地客户端，请切换到注册，用同一个用户名重新创建本地账号。";
+  }
+  if (text.includes("username_already_exists")) {
+    return "该用户名已存在，请切换到登录。";
+  }
+  if (text.includes("password_too_short")) {
+    return "密码至少需要 6 位。";
+  }
+  if (text.includes("username_required")) {
+    return "请输入用户名。";
+  }
+  return text || "请求失败，请稍后重试。";
+}
+
 function AuthBrandHero() {
   return (
     <section
@@ -119,7 +136,7 @@ export default function AuthPage() {
       setError("");
       router.replace("/setup");
     } catch (e: any) {
-      setError(String(e?.message || e));
+      setError(friendlyAuthError(e?.message || e, mode));
     } finally {
       setSubmitting(false);
     }
@@ -139,7 +156,23 @@ export default function AuthPage() {
       </div>
 
       {message ? <div className="panel mx-auto w-full max-w-md border-emerald-200 bg-emerald-50 text-emerald-700">{message}</div> : null}
-      {error ? <div className="panel mx-auto w-full max-w-md border-rose-200 bg-rose-50 text-rose-700">{error}</div> : null}
+      {error ? (
+        <div className="panel mx-auto w-full max-w-md border-rose-200 bg-rose-50 text-rose-700">
+          <div>{error}</div>
+          {mode === "login" && error.includes("重新创建本地账号") ? (
+            <button
+              className="btn-secondary mt-3"
+              type="button"
+              onClick={() => {
+                setMode("register");
+                setError("");
+              }}
+            >
+              切换到注册
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="panel mx-auto w-full max-w-md space-y-3">
         <div className="flex gap-2">

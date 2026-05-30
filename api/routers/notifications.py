@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +83,75 @@ def _status_payload(data: dict[str, Any], feishu_cfg: dict[str, str]) -> dict[st
         "feishu_app_bots_count": app_count,
         "feishu_bots_count": webhook_count + app_count,
         "feishu_push_targets_count": webhook_count + (1 if app_configured and scheduled_configured else 0),
+    }
+
+
+def _is_scheduled_report_trading_day(now: datetime) -> bool:
+    return now.weekday() < 5
+
+
+def _is_scheduled_report_window(now: datetime) -> bool:
+    return not (6 <= now.hour <= 7)
+
+
+def _format_local_dt(value: datetime) -> str:
+    return value.strftime("%Y-%m-%d %H:%M")
+
+
+def _next_scheduled_report_candidate(now: datetime) -> datetime:
+    candidate = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    for _ in range(24 * 10):
+        if _is_scheduled_report_trading_day(candidate) and _is_scheduled_report_window(candidate):
+            return candidate
+        candidate += timedelta(hours=1)
+    return candidate
+
+
+def _scheduled_market_report_status(
+    status: dict[str, Any],
+    prefs: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    cur = now or datetime.now()
+    pref = prefs.get("scheduled_market_report") if isinstance(prefs, dict) else {}
+    enabled = bool(pref.get("enabled", True)) if isinstance(pref, dict) else True
+    app_configured = bool(status.get("feishu_app_configured"))
+    chat_configured = bool(status.get("scheduled_chat_id_configured"))
+    trading_day = _is_scheduled_report_trading_day(cur)
+    in_window = _is_scheduled_report_window(cur)
+    next_candidate = _next_scheduled_report_candidate(cur)
+
+    reason = "ready"
+    message = "当前符合定时报告发送条件；飞书机器人运行时会在下一个整点尝试发送。"
+    if not app_configured:
+        reason = "missing_feishu_app"
+        message = "飞书应用 App ID/App Secret 未配置，定时报告无法发送。"
+    elif not chat_configured:
+        reason = "missing_scheduled_chat_id"
+        message = "未配置 scheduled_chat_id，飞书机器人不会启动定时报告线程。"
+    elif not enabled:
+        reason = "disabled"
+        message = "通知中心已关闭「定时市场分析报告」，整点会跳过。"
+    elif not trading_day:
+        reason = "non_trading_day"
+        message = "今天不是周一到周五，定时市场分析报告会跳过。"
+    elif not in_window:
+        reason = "outside_window"
+        message = "当前处于 06:00-07:59 跳过时段，定时报告暂不发送。"
+
+    return {
+        "enabled": enabled,
+        "scheduled_chat_id_configured": chat_configured,
+        "feishu_app_configured": app_configured,
+        "trading_day": trading_day,
+        "in_trading_window": in_window,
+        "should_send_now": reason == "ready",
+        "reason": reason,
+        "message": message,
+        "now": _format_local_dt(cur),
+        "next_candidate_at": _format_local_dt(next_candidate),
+        "rule": "按本机时间：周一至周五 00:00-05:59、08:00-23:59 的整点尝试发送；06:00-07:59 跳过。",
     }
 
 
@@ -229,6 +298,7 @@ def notifications_status(
     return {
         **status,
         "feishu_config_source": "env" if env_override else "file",
+        "scheduled_market_report_status": _scheduled_market_report_status(status, prefs),
         "preferences_summary": {
             "scheduled_market_report": bool((prefs.get("scheduled_market_report") or {}).get("enabled", True)),
             "semi_auto_pending_signal": bool((prefs.get("semi_auto_pending_signal") or {}).get("enabled", True)),

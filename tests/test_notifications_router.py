@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,11 @@ def _write_notification_config(root: Path, data: dict[str, Any], *, bom: bool = 
 
 def test_notifications_status_reads_bom_config_and_counts_app_bot(tmp_path, monkeypatch):
     monkeypatch.setattr(notifications, "MCP_DIR", str(tmp_path / "mcp_server"))
+    monkeypatch.setattr(
+        notifications,
+        "load_notification_preferences",
+        lambda: {"scheduled_market_report": {"enabled": True}},
+    )
     for key in ("FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_SCHEDULED_CHAT_ID"):
         monkeypatch.delenv(key, raising=False)
     _write_notification_config(
@@ -45,6 +51,30 @@ def test_notifications_status_reads_bom_config_and_counts_app_bot(tmp_path, monk
     assert result["feishu_app_bots_count"] == 1
     assert result["feishu_bots_count"] == 2
     assert result["feishu_push_targets_count"] == 2
+    report_status = result["scheduled_market_report_status"]
+    assert report_status["enabled"] is True
+    assert report_status["feishu_app_configured"] is True
+    assert report_status["scheduled_chat_id_configured"] is True
+    assert "next_candidate_at" in report_status
+
+
+def test_scheduled_market_report_status_explains_weekend_skip():
+    status = {
+        "feishu_app_configured": True,
+        "scheduled_chat_id_configured": True,
+    }
+    prefs = {"scheduled_market_report": {"enabled": True}}
+
+    result = notifications._scheduled_market_report_status(
+        status,
+        prefs,
+        now=datetime(2026, 5, 30, 16, 18),
+    )
+
+    assert result["should_send_now"] is False
+    assert result["reason"] == "non_trading_day"
+    assert result["trading_day"] is False
+    assert result["next_candidate_at"] == "2026-06-01 00:00"
 
 
 def test_notifications_test_feishu_uses_app_chat_without_real_network(tmp_path, monkeypatch):

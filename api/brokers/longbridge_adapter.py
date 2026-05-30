@@ -46,7 +46,20 @@ class LongBridgeAdapter(BrokerAdapter):
         if exp is not None and exp <= int(time.time()):
             raise ValueError(f"longbridge_access_token_expired: exp={exp}")
 
+    @staticmethod
+    def _raise_if_credentials_missing(credentials: BrokerCredentials) -> None:
+        missing = []
+        if not str(credentials.app_key or "").strip():
+            missing.append("app_key")
+        if not str(credentials.app_secret or "").strip():
+            missing.append("app_secret")
+        if not str(credentials.access_token or "").strip():
+            missing.append("access_token")
+        if missing:
+            raise ValueError(f"longbridge_credentials_required: {','.join(missing)}")
+
     def create_contexts(self, credentials: BrokerCredentials) -> BrokerContexts:
+        self._raise_if_credentials_missing(credentials)
         self._raise_if_token_expired(credentials.access_token)
         cfg = Config.from_apikey(
             credentials.app_key,

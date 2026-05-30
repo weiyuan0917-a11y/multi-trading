@@ -247,6 +247,20 @@ export default function NotificationsPage() {
   const feishuBotRunning = !!serviceStatus?.feishu_bot_running;
   const autoTraderRunning = !!serviceStatus?.auto_trader_scheduler_running;
   const serviceStatusReady = !!serviceStatus;
+  const scheduledReportStatus = data?.scheduled_market_report_status || null;
+  const scheduledReportReady = !!scheduledReportStatus?.should_send_now && feishuBotRunning;
+  const scheduledReportStatusText = !scheduledReportStatus
+    ? "读取中"
+    : scheduledReportReady
+      ? "等待整点发送"
+      : scheduledReportStatus?.should_send_now
+        ? "机器人未运行"
+        : "当前会跳过";
+  const scheduledReportStatusClass = scheduledReportReady
+    ? "text-emerald-400"
+    : scheduledReportStatus?.should_send_now
+      ? "text-amber-300"
+      : "text-slate-400";
 
   return (
     <PageShell>
@@ -327,6 +341,22 @@ export default function NotificationsPage() {
             <p className="text-xs text-slate-500">
               需配置 scheduled_chat_id；整点市场报告是否发送由下方「定时市场分析报告」开关控制（保存后飞书机器人下次整点前会按新配置生效）。
             </p>
+            {scheduledReportStatus ? (
+              <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3 text-xs">
+                <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                  <span className="text-slate-200">定时市场分析报告</span>
+                  <span className={scheduledReportStatusClass}>{scheduledReportStatusText}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-slate-400">
+                  <span>开关: {scheduledReportStatus.enabled ? "已开启" : "已关闭"}</span>
+                  <span>交易日: {scheduledReportStatus.trading_day ? "是" : "否"}</span>
+                  <span>发送窗口: {scheduledReportStatus.in_trading_window ? "是" : "否"}</span>
+                  <span>机器人: {serviceStatusReady ? (feishuBotRunning ? "运行中" : "已停止") : "读取中"}</span>
+                </div>
+                <div className="mt-2 text-slate-300">{scheduledReportStatus.message}</div>
+                <div className="mt-1 text-slate-500">下次符合规则整点: {scheduledReportStatus.next_candidate_at || "-"}</div>
+              </div>
+            ) : null}
 
             <div className="border-t border-slate-700 pt-3">
               <div className="mb-2 flex items-center justify-between text-sm">

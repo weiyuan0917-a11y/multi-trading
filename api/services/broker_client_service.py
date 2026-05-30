@@ -41,6 +41,13 @@ def is_broker_connect_error(err: Exception | str) -> bool:
             "timed out",
             "connection refused",
             "breaker_open",
+            "token empty",
+            "401001",
+            "credentials_required",
+            "access_token_required",
+            "app_key_required",
+            "app_secret_required",
+            "longbridge_access_token_expired",
         )
     )
 

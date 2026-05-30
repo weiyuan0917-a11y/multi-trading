@@ -262,6 +262,22 @@ class UserAuthService:
             "session_created_at": info.created_at,
         }
 
+    def local_state(self, username: str | None = None) -> dict[str, Any]:
+        name = _normalize_username(username or "")
+        with _LOCK:
+            users = _load_users_file().get("users") or []
+            username_exists = any(
+                isinstance(u, dict) and _normalize_username(str(u.get("username", ""))) == name
+                for u in users
+            ) if name else False
+        return {
+            "ok": True,
+            "users_file_exists": os.path.isfile(_AUTH_USERS_FILE),
+            "sessions_file_exists": os.path.isfile(_AUTH_SESSIONS_FILE),
+            "user_count": len([u for u in users if isinstance(u, dict)]),
+            "username_exists": bool(username_exists),
+        }
+
     def me(self, token: str) -> dict[str, Any]:
         tk = str(token or "").strip()
         if not tk:
@@ -285,7 +301,12 @@ class UserAuthService:
                 ),
                 None,
             )
-        return {"ok": True, "user": _public_user(row, info.username), "session_created_at": info.created_at}
+        return {
+            "ok": True,
+            "user": _public_user(row, info.username),
+            "session_created_at": info.created_at,
+            "user_record_missing": not isinstance(row, dict),
+        }
 
     def public_user(self, username: str) -> dict[str, Any]:
         name = _normalize_username(username)

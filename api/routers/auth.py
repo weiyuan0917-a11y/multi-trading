@@ -54,7 +54,16 @@ def auth_login(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     try:
         out = svc.login(parsed.username, parsed.password)
     except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        code = str(e)
+        detail: Any = code
+        if code == "invalid_username_or_password":
+            detail = {
+                "error": code,
+                "message": "用户名或密码不正确。若这是升级、重装或迁移后的本地客户端，请切换到注册，用同一个用户名重新创建本地账号。",
+                "hint": "本地登录账号只保存在当前安装目录 data/auth/users.json；退出登录后需要该文件存在才能再次登录。",
+                "local_state": svc.local_state(parsed.username),
+            }
+        raise HTTPException(status_code=401, detail=detail)
     user = out.get("user") if isinstance(out, dict) else None
     un = str((user or {}).get("username", "")).strip().lower() if isinstance(user, dict) else ""
     if un:
@@ -75,6 +84,11 @@ def auth_me(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     if un:
         _sync_env_light(un)
     return out
+
+
+@router.get("/auth/local-state")
+def auth_local_state(username: str | None = Query(default=None)) -> dict[str, Any]:
+    return get_user_auth_service().local_state(username)
 
 
 @router.post("/auth/logout")

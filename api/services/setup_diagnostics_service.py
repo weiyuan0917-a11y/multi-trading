@@ -61,6 +61,16 @@ def build_broker_diagnostics_response(
         alert_level = "ok"
 
     recommendations: list[str] = []
+    error_text = f"{last_error or ''} {probe_error or ''}".lower()
+    if "token empty" in error_text or "401001" in error_text or ("access_token" in error_text and "required" in error_text):
+        alert_level = "warning"
+        recommendations.append("Longbridge Access Token 为空，请在“账户与券商”里重新填写三段 API 凭证，勾选覆盖后保存。")
+    elif "credentials_required" in error_text or "missing_broker_credentials" in error_text:
+        alert_level = "warning"
+        recommendations.append("券商 API 凭证不完整，请重新填写该券商要求的所有字段后保存。")
+    elif "longbridge_access_token_expired" in error_text:
+        alert_level = "warning"
+        recommendations.append("Longbridge Access Token 已过期，请重新生成并覆盖保存。")
     if alert_level in {"critical", "warning", "notice"}:
         if feishu_running:
             recommendations.append("如非必要，先停止 Feishu Bot 以立即释放约2个连接。")
@@ -126,4 +136,3 @@ def build_broker_diagnostics_response(
 # Backward-compatible alias.
 def build_longport_diagnostics_response(**kwargs) -> dict[str, Any]:
     return build_broker_diagnostics_response(**kwargs)
-

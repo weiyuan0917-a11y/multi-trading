@@ -1881,7 +1881,7 @@ def main():
     if SCHEDULED_CHAT_ID:
         t = threading.Thread(target=_scheduler_loop, daemon=True)
         t.start()
-        log.info("定时推送: 已启动（交易日 08:00-次日05:59 每小时整点）")
+        log.info("定时推送: 已启动（本机时间周一至周五，跳过 06:00-07:59，每小时整点）")
 
         try:
             from api.notification_preferences import should_run_feishu_builtin_reversal

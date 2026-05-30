@@ -1400,6 +1400,63 @@ def _clear_setup_services_status_cache(owner_id: str | None = None) -> None:
             _setup_services_status_cache_by_owner.clear()
 
 
+def _broker_connect_error_detail(
+    err: Exception | str,
+    *,
+    account_id: str | None = None,
+    owner_id: str | None = None,
+) -> dict[str, Any]:
+    detail = str(err or "").strip()
+    lower = detail.lower()
+    message = "券商连接失败，请检查 Broker API 配置、网络连接和券商账户状态。"
+    hint = "请在“账户与券商”里重新保存凭证后再点击连接。"
+    reason = "broker_connect_failed"
+    error = "broker_connect_error"
+
+    if "account_not_found" in lower or "default_account_not_set" in lower:
+        error = "broker_account_error"
+        reason = "broker_account_not_found"
+        message = "当前登录用户下没有找到这个券商账户。"
+        hint = "请先在“账户与券商”里注册该账户，或确认当前登录用户名与原来配置账户时一致。"
+    elif "token empty" in lower or "401001" in lower or "access_token" in lower and "required" in lower:
+        reason = "longbridge_access_token_missing"
+        message = "券商连接失败：Longbridge Access Token 为空。"
+        hint = "请重新填写 Longbridge App Key、App Secret、Access Token，勾选覆盖后保存，再点击连接。"
+    elif "app_key" in lower and "required" in lower:
+        reason = "longbridge_app_key_missing"
+        message = "券商连接失败：Longbridge App Key 为空。"
+        hint = "请重新填写 Longbridge App Key、App Secret、Access Token，勾选覆盖后保存。"
+    elif "app_secret" in lower and "required" in lower:
+        reason = "longbridge_app_secret_missing"
+        message = "券商连接失败：Longbridge App Secret 为空。"
+        hint = "请重新填写 Longbridge App Key、App Secret、Access Token，勾选覆盖后保存。"
+    elif "credentials_required" in lower or "missing_broker_credentials" in lower:
+        reason = "broker_credentials_missing"
+        message = "券商连接失败：券商 API 凭证不完整。"
+        hint = "请重新填写该券商要求的所有 API 字段，保存后再连接。"
+    elif "longbridge_access_token_expired" in lower:
+        reason = "longbridge_access_token_expired"
+        message = "券商连接失败：Longbridge Access Token 已过期。"
+        hint = "请到 Longbridge 开发者后台重新生成 Access Token，然后覆盖保存。"
+    elif "breaker_open" in lower:
+        reason = "broker_connect_breaker_open"
+        message = "券商连接刚刚失败过，系统正在短暂保护中。"
+        hint = "请确认凭证无误后稍等几十秒再连接，或覆盖保存凭证后重试。"
+
+    payload: dict[str, Any] = {
+        "error": error,
+        "reason": reason,
+        "message": message,
+        "hint": hint,
+        "detail": detail,
+    }
+    if account_id:
+        payload["account_id"] = str(account_id)
+    if owner_id:
+        payload["owner_id"] = str(owner_id)
+    return payload
+
+
 def _sync_trading_worker_configs_to_account(owner_id: str | None, account_id: str | None) -> list[dict[str, Any]]:
     owner = _normalize_owner_id(owner_id)
     aid = str(account_id or "").strip()
@@ -1485,10 +1542,16 @@ def setup_account_connect(account_id: str, owner_id: str) -> dict[str, Any]:
         qctx, tctx, rec = m.ACCOUNT_REGISTRY.connect_account(aid, owner_id=owner_id)
     except ValueError as e:
         _clear_setup_services_status_cache(owner_id)
-        raise m.HTTPException(status_code=400, detail=str(e))
+        raise m.HTTPException(
+            status_code=400,
+            detail=_broker_connect_error_detail(e, account_id=aid, owner_id=owner_id),
+        )
     except Exception as e:
         _clear_setup_services_status_cache(owner_id)
-        raise m.HTTPException(status_code=400, detail=str(e))
+        raise m.HTTPException(
+            status_code=400,
+            detail=_broker_connect_error_detail(e, account_id=aid, owner_id=owner_id),
+        )
     post_connect_stop_results = _stop_auto_workers_after_account_connect(m, account_switched=False)
     auto_stop_results = [*pre_connect_stop_results, *post_connect_stop_results]
     synced_worker_configs = _sync_trading_worker_configs_to_account(owner_id=owner_id, account_id=rec.account_id)
@@ -2760,14 +2823,7 @@ def _is_trade_gateway_success(payload: Any, *, required_keys: tuple[str, ...] = 
 
 
 def _raise_broker_connect_http_error(m: Any, err: Exception | str) -> None:
-    raise m.HTTPException(
-        status_code=503,
-        detail={
-            "error": "broker_connect_error",
-            "message": "券商连接失败，系统已自动重置连接并将继续重试。请检查网络、Longbridge 凭证和账户连接状态。",
-            "detail": str(err),
-        },
-    )
+    raise m.HTTPException(status_code=503, detail=_broker_connect_error_detail(err))
 
 
 def _with_trade_context_retry(
