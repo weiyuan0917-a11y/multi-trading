@@ -33,6 +33,7 @@ def main() -> int:
             pass_args.append(arg)
     if worker:
         modules = {
+            "feishu_command_bot": "mcp_server.feishu_command_bot",
         }
         mod = modules.get(worker)
         if not mod:

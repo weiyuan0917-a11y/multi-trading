@@ -377,7 +377,9 @@ def _worker_launch_cmd(worker: str, *args: str) -> list[str]:
     backend_exe = os.path.join(ROOT, "Backend.exe")
     if os.path.isfile(backend_exe):
         return [backend_exe, f"--worker={worker}", *[str(a) for a in args if str(a)]]
-    script_map: dict[str, str] = {}
+    script_map: dict[str, str] = {
+        "feishu_command_bot": os.path.join(ROOT, "mcp_server", "feishu_command_bot.py"),
+    }
     script = script_map.get(worker)
     if not script:
         raise ValueError(f"unknown worker: {worker}")

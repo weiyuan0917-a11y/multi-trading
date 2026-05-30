@@ -59,7 +59,7 @@ DEFAULT_NOTIFICATION_PREFERENCES: dict[str, Any] = {
 
 
 def notification_config_path() -> str:
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = os.path.abspath(os.getenv("MULTITRADING_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return os.path.join(root, "mcp_server", "notification_config.json")
 
 
@@ -137,6 +137,7 @@ def save_notification_preferences(prefs: dict[str, Any]) -> dict[str, Any]:
     with _LOCK:
         data = _read_config_file()
         data["notification_preferences"] = normalized
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

@@ -13,6 +13,13 @@ _FRONTEND_PRIMARY_PORT = 3010
 _FRONTEND_LEGACY_PORTS = (3000,)
 
 
+def _feishu_bot_launch_cmd(root: str, mcp_dir: str) -> list[str]:
+    backend_exe = os.path.join(root, "Backend.exe")
+    if os.path.isfile(backend_exe):
+        return [backend_exe, "--worker=feishu_command_bot"]
+    return [sys.executable, "-u", os.path.join(mcp_dir, "feishu_command_bot.py")]
+
+
 def start_services(
     *,
     start_feishu_bot: bool,
@@ -77,11 +84,12 @@ def start_services(
             if p and p.poll() is None:
                 started["feishu_bot"] = "already_running"
             else:
+                os.makedirs(mcp_dir, exist_ok=True)
                 env = os.environ.copy()
                 env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-                script = os.path.join(mcp_dir, "feishu_command_bot.py")
+                env["MULTITRADING_ROOT"] = root
                 managed_processes["feishu_bot"] = subprocess.Popen(  # noqa: S603
-                    [sys.executable, "-u", script],
+                    _feishu_bot_launch_cmd(root, mcp_dir),
                     cwd=root,
                     env=env,
                     **win_subprocess_silent_kwargs(),

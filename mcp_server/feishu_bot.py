@@ -449,9 +449,18 @@ class NotificationManager:
 
 import os
 
-NOTIFICATION_CONFIG_PATH = os.path.join(
-    os.path.dirname(__file__), "notification_config.json"
-)
+def _runtime_root() -> str:
+    return os.path.abspath(
+        os.getenv("MULTITRADING_ROOT")
+        or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+
+
+def notification_config_path() -> str:
+    return os.path.join(_runtime_root(), "mcp_server", "notification_config.json")
+
+
+NOTIFICATION_CONFIG_PATH = notification_config_path()
 
 def load_notification_config() -> NotificationManager:
     """从配置文件加载通知配置"""
@@ -473,6 +482,7 @@ def load_notification_config() -> NotificationManager:
                 # }
             ]
         }
+        os.makedirs(os.path.dirname(NOTIFICATION_CONFIG_PATH), exist_ok=True)
         with open(NOTIFICATION_CONFIG_PATH, 'w', encoding='utf-8') as f:
             json.dump(default_config, f, indent=2, ensure_ascii=False)
         return manager

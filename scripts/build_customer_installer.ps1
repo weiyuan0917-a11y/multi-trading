@@ -406,6 +406,25 @@ New-Item -ItemType Directory -Force -Path (Join-Path $appDir "data\qqq_0dte_quot
 Copy-CustomerKlineSeedCaches
 New-Item -ItemType Directory -Force -Path (Join-Path $appDir "logs") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $appDir "config") | Out-Null
+$mcpRuntimeDir = Join-Path $appDir "mcp_server"
+New-Item -ItemType Directory -Force -Path $mcpRuntimeDir | Out-Null
+@{
+  feishu_app = @{
+    app_id = ""
+    app_secret = ""
+    scheduled_chat_id = ""
+  }
+  feishu_bots = @()
+  dingtalk_bots = @()
+  notification_preferences = @{
+    scheduled_market_report = @{ enabled = $true }
+    semi_auto_pending_signal = @{ enabled = $true }
+    full_auto_execution = @{ enabled = $true; notify_on_failure = $true }
+    observer_mode_digest = @{ enabled = $true }
+    bottom_reversal_watch = @{ enabled = $false; symbols = @(); poll_interval_seconds = 300; only_on_edge = $true; cooldown_minutes = 120 }
+    feishu_builtin_reversal_monitor = @{ enabled = $false; selection_mode = "multi"; selected_conditions = @("rsi_rebound", "macd_bullish_cross_below_zero", "bollinger_rebound", "hammer_candle", "volume_rebound", "ma5_cross_ma20") }
+  }
+} | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 -Path (Join-Path $mcpRuntimeDir "notification_config.json")
 Copy-Item -LiteralPath $licensePublicKeyPath -Destination (Join-Path $appDir "config\local_license_public.pem") -Force
 Remove-Item -LiteralPath (Join-Path $appDir "data\user_env") -Recurse -Force -ErrorAction SilentlyContinue
 @"
@@ -441,6 +460,7 @@ Notes:
 - This customer package does not expose source files, payment-order admin, or license-issuing admin pages.
 - Local data is stored under the installed data and logs folders.
 - QQQ 0DTE quote snapshots are stored under data\option_quotes by default.
+- Feishu push uses data\user_env plus mcp_server\notification_config.json; no separate Python install is required.
 - License verification uses config\local_license_public.pem.
 - Customers do not need to install Python, Node.js, or npm.
 "@ | Set-Content -Encoding UTF8 -Path (Join-Path $appDir "README_CUSTOMER.txt")
@@ -458,6 +478,8 @@ Notes:
   included_features = @(
     "qqq_0dte_quote_collector",
     "qqq_0dte_quote_collector_frontend_panel",
+    "feishu_realtime_push_runtime",
+    "feishu_notification_config",
     "rsa_license_verification_public_key"
   )
 } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -Path (Join-Path $appDir "customer_build_manifest.json")

@@ -18,6 +18,7 @@ import logging
 import threading
 import atexit
 import subprocess
+import importlib
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -25,12 +26,25 @@ from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-_dir = os.path.dirname(os.path.abspath(__file__))
-if _dir not in sys.path:
-    sys.path.insert(0, _dir)
-_root = os.path.dirname(_dir)
-if _root not in sys.path:
-    sys.path.insert(0, _root)
+_module_dir = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.abspath(os.getenv("MULTITRADING_ROOT") or os.path.dirname(_module_dir))
+_dir = os.path.join(_root, "mcp_server")
+os.makedirs(_dir, exist_ok=True)
+for _path in (_module_dir, _dir, _root):
+    if _path and _path not in sys.path:
+        sys.path.insert(0, _path)
+
+
+def _alias_mcp_module(short_name: str) -> None:
+    try:
+        module = importlib.import_module(f"mcp_server.{short_name}")
+        sys.modules.setdefault(short_name, module)
+    except Exception:
+        pass
+
+
+for _short_module in ("risk_manager", "market_analysis"):
+    _alias_mcp_module(_short_module)
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
