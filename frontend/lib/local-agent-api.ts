@@ -13,6 +13,10 @@ export const LOCAL_AGENT_API_BASE =
   process.env.NEXT_PUBLIC_LOCAL_AGENT_API_BASE ||
   process.env.NEXT_PUBLIC_API_BASE ||
   "http://127.0.0.1:8010";
+const LOCAL_AGENT_API_FALLBACK_BASES = [
+  "http://127.0.0.1:8010",
+  "http://localhost:8010",
+].filter((base) => base !== LOCAL_AGENT_API_BASE);
 export const LOCAL_AGENT_OWNER_ID = LOCAL_OWNER_ID;
 
 export function setLocalAgentCloudIdentity(identity: {
@@ -36,6 +40,7 @@ function localOwnerHeaders(): Record<string, string> {
 
 export const localAgentApi = createJsonApiClient({
   baseUrl: LOCAL_AGENT_API_BASE,
+  fallbackBaseUrls: LOCAL_AGENT_API_FALLBACK_BASES,
   includeAuthToken: true,
   getRuntimeHeaders: localOwnerHeaders,
 });

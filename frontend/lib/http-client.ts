@@ -133,6 +133,22 @@ function buildUrl(base: string, path: string): string {
   return `${normalizeBaseUrl(base)}${rawPath.startsWith("/") ? rawPath : `/${rawPath}`}`;
 }
 
+function isFetchNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = String(error.message || "").toLowerCase();
+  return error.name === "TypeError" && (message.includes("failed to fetch") || message.includes("fetch failed"));
+}
+
+function networkErrorMessage(path: string, bases: string[]): string {
+  const endpoint = String(path || "");
+  const candidates = bases.length ? bases : ["http://127.0.0.1:8010"];
+  return [
+    "无法连接本地后端 API。请确认 MultiTradingLauncher.exe 已启动，或在浏览器打开 http://127.0.0.1:8010/health 检查后端是否在线。",
+    `请求接口：${endpoint}`,
+    `已尝试地址：${candidates.join(", ")}`,
+  ].join("\n");
+}
+
 function authHeaders(includeAuthToken: boolean): Record<string, string> {
   if (!includeAuthToken || typeof window === "undefined") return {};
   const token = String(window.localStorage.getItem("mt_auth_token") || "").trim();
@@ -211,6 +227,9 @@ export function createJsonApiClient(config: JsonApiClientConfig) {
 
     if (lastErr instanceof Error && lastErr.name === "AbortError") {
       throw new Error("\u8bf7\u6c42\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5");
+    }
+    if (isFetchNetworkError(lastErr)) {
+      throw new Error(networkErrorMessage(path, bases));
     }
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   }

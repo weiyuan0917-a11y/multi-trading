@@ -336,6 +336,7 @@ if ($ReuseFrontend -and (Test-Path $standaloneServer) -and (Test-Path $static)) 
     try {
       $env:MT_BUILD_TARGET = "customer"
       $env:NEXT_PUBLIC_MT_BUILD_TARGET = "customer"
+      $env:NEXT_PUBLIC_LOCAL_AGENT_API_BASE = "http://127.0.0.1:8010"
       $env:NEXT_TELEMETRY_DISABLED = "1"
       Remove-Item -LiteralPath (Join-Path $frontendDir ".next") -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath (Join-Path $frontendDir "tsconfig.tsbuildinfo") -Force -ErrorAction SilentlyContinue

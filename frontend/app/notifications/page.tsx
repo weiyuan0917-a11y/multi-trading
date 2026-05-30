@@ -208,7 +208,7 @@ export default function NotificationsPage() {
         </div>
       </div>
 
-      {error ? <div className="panel border-rose-500/40 bg-rose-950/40 text-rose-200">{error}</div> : null}
+      {error ? <div className="panel whitespace-pre-line border-rose-500/40 bg-rose-950/40 text-rose-200">{error}</div> : null}
       {message ? <div className="panel border-emerald-500/40 bg-emerald-950/30 text-emerald-200">{message}</div> : null}
 
       {data && serviceStatus ? (
