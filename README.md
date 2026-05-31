@@ -14,6 +14,8 @@
   <strong><a href="https://github.com/weiyuan0917-a11y/multi-trading/releases/tag/v1.0.16">下载 Windows 安装包：MultiTradingSetup-1.0.16.exe</a></strong>
   <br />
   <a href="./CHANGELOG.md">更新日志 / Changelog</a>
+  <br />
+  当前源码与客户版构建脚本版本：V1.0.17（安装包发布后更新 Release 下载链接）
 </p>
 
 <p align="center">
@@ -194,8 +196,8 @@ AUTO_TRADER_API_PROXY_TIMEOUT_SECONDS=8
 # Worker 代理失败时是否允许回退直连 broker（LongPort-compatible provider，默认关闭，避免新增连接）
 LONGPORT_DIRECT_FALLBACK=0
 
-# API 启动时若 auto_trader_config.json 中 enabled=true，是否自动拉起独立 Worker/Supervisor（默认 true；仅跑 API、手动管进程时可设 false）
-AUTO_TRADER_AUTOSTART_ON_API_BOOT=true
+# API 启动时是否自动拉起独立 Worker/Supervisor（默认 false；实盘建议保持 false，只手动启动）
+AUTO_TRADER_AUTOSTART_ON_API_BOOT=false
 
 # 按「日历天数」拉 K 线时是否优先读 data/klines 缓存（与回测页「下载K线到服务器」一致）；默认 1 开启，0 关闭仅分页拉取
 LONGPORT_USE_SERVER_KLINE_CACHE=1
@@ -415,8 +417,9 @@ cmd /c "set PORT=3010&&npm run dev"
 #### 6.1.1 独立 Worker（扫描进程）
 
 - 定时扫描、信号与 `.auto_trader_worker.runtime.json`（前端「worker 更新时间」等）由 **独立进程** `api/auto_trader_worker.py` 在 **Supervisor** 守护下运行，与 **API 主进程分离**。
-- 在 **自动交易页保存配置**、模板应用、配置导入/回滚、Agent 改配置时，后端会按当前 **`enabled`** 自动尝试 **启动或停止** Supervisor（不必仅依赖「设置 → 启动服务」）。**重启 API** 后若 `enabled=true`，默认也会自动拉起 Worker（可用环境变量 **`AUTO_TRADER_AUTOSTART_ON_API_BOOT=false`** 关闭）。
-- 仍可通过 **`POST /setup/services/start`**（`enable_auto_trader: true`）手动启动，与上述逻辑兼容。
+- 在 **自动交易页保存配置**、模板应用、配置导入/回滚、Agent 改配置、研究参数应用时，后端只保存配置，**不应自动启动或停止** Supervisor。
+- 股票自动交易 Worker 应只能通过 Auto Trader 页面手动启动/重启，或由显式服务启动接口 **`POST /setup/services/start`**（`enable_auto_trader: true`）启动。
+- **重启 API** 默认不应自动拉起 Worker；实盘环境建议保持 **`AUTO_TRADER_AUTOSTART_ON_API_BOOT=false`**。
 
 ### 6.2 模式
 
@@ -825,7 +828,7 @@ python mcp_server/feishu_command_bot.py
 
 ### Q9: Worker 扫描时间不动 / 接口返回 `409` `worker_not_running`
 
-- 确认 **`auto_trader_config.json`** 里 **`enabled=true`**，且 Supervisor 已启动（Setup 启动服务或保存配置会自动同步）。
+- 确认 **`auto_trader_config.json`** 里 **`enabled=true`**，且已在 Auto Trader 页面手动启动/重启 Worker；保存配置本身不应启动 Supervisor。
 - 小生产请勿对 API 使用 **`--reload`**，否则子进程管理易与预期不一致；见 **§4.0**。
 
 ---

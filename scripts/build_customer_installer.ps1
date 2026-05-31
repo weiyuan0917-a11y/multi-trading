@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.0.16",
+  [string]$Version = "1.0.17",
   [string]$ReleaseRoot = "dist\customer",
   [switch]$SkipInno,
   [switch]$ReuseBackend,
@@ -451,6 +451,7 @@ LONGPORT_WEB_PORT=3010
 LOCAL_AGENT_ALLOW_USER_OWNERS=true
 LOCAL_LICENSE_PUBLIC_KEY_PATH=config\local_license_public.pem
 LOCAL_LICENSE_ALLOW_UNSIGNED=false
+AUTO_TRADER_AUTOSTART_ON_API_BOOT=false
 "@
 Set-Utf8NoBomFile -Path (Join-Path $appDir ".env") -Content $customerEnvText
 Set-Utf8NoBomFile -Path (Join-Path $appDir ".env.example") -Content $customerEnvText

@@ -172,34 +172,6 @@ export default function NotificationsPage() {
     }
   };
 
-  const startAutoTrader = async () => {
-    setLoading(true);
-    try {
-      await apiPost("/setup/services/start", { start_feishu_bot: false, enable_auto_trader: true });
-      setMessage("自动交易已启动");
-      await loadStatus();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setLoading(false);
-      setTimeout(() => setMessage(""), 3000);
-    }
-  };
-
-  const stopAutoTrader = async () => {
-    setLoading(true);
-    try {
-      await apiPost("/setup/services/stop", { stop_feishu_bot: false, stop_auto_trader: true });
-      setMessage("自动交易已停止");
-      await loadStatus();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setLoading(false);
-      setTimeout(() => setMessage(""), 3000);
-    }
-  };
-
   const importSymbolsFromSignalsPage = () => {
     try {
       const raw = localStorage.getItem(SIGNALS_PAGE_STORAGE_KEY);
@@ -269,7 +241,7 @@ export default function NotificationsPage() {
           <div>
             <h1 className="page-title">通知中心</h1>
             <div className="mt-1 text-sm text-slate-300">
-              服务启停 · 推送状态 · 自动交易调度 · 通知偏好（读写）
+              飞书服务 · 推送状态 · 通知偏好（读写）
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -365,22 +337,9 @@ export default function NotificationsPage() {
                   {serviceStatusReady ? (autoTraderRunning ? "运行中" : "已停止") : "读取中"}
                 </span>
               </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={startAutoTrader}
-                  disabled={loading || !serviceStatusReady || autoTraderRunning}
-                  className="btn-primary flex-1 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  开启
-                </button>
-                <button
-                  onClick={stopAutoTrader}
-                  disabled={loading || !serviceStatusReady || !autoTraderRunning}
-                  className="btn-secondary flex-1 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  关闭
-                </button>
-              </div>
+              <p className="text-xs text-slate-500">
+                通知中心只展示状态；股票自动交易 Worker 只能在 Auto Trader 页面手动启动或重启。
+              </p>
             </div>
           </div>
         </div>
