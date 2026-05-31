@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <strong><a href="https://github.com/weiyuan0917-a11y/multi-trading/releases/tag/V1.018">下载 Windows 安装包：MultiTradingSetup-1.0.18.exe</a></strong>
+  <strong><a href="https://github.com/weiyuan0917-a11y/multi-trading/releases/tag/V1.0.18">下载 Windows 安装包：MultiTradingSetup-1.0.18.exe</a></strong>
   <br />
   <a href="./CHANGELOG.md">更新日志 / Changelog</a>
   <br />
