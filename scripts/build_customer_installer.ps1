@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.0.17",
+  [string]$Version = "1.0.24",
   [string]$ReleaseRoot = "dist\customer",
   [switch]$SkipInno,
   [switch]$ReuseBackend,
@@ -164,12 +164,13 @@ function Assert-CustomerPackageContentsLegacy {
 
 function Assert-CustomerPackageContents {
   $frontendOut = Join-Path $appDir "frontend"
-  Assert-NotExists (Join-Path $frontendOut ".next\server\app\admin") "Customer package must not include admin pages"
-  Assert-NotExists (Join-Path $frontendOut ".next\server\app\api\admin") "Customer package must not include admin API routes"
+  $frontendBuildOut = Join-Path $frontendOut $customerNextDirName
+  Assert-NotExists (Join-Path $frontendBuildOut "server\app\admin") "Customer package must not include admin pages"
+  Assert-NotExists (Join-Path $frontendBuildOut "server\app\api\admin") "Customer package must not include admin API routes"
 
   $adminMatches = @()
-  if (Test-Path (Join-Path $frontendOut ".next")) {
-    $adminMatches = Get-ChildItem -LiteralPath (Join-Path $frontendOut ".next") -Recurse -File -ErrorAction SilentlyContinue |
+  if (Test-Path $frontendBuildOut) {
+    $adminMatches = Get-ChildItem -LiteralPath $frontendBuildOut -Recurse -File -ErrorAction SilentlyContinue |
       Where-Object {
         $_.FullName -match "admin[\\/](orders|licenses)" -or
         $_.FullName -match "app[\\/]api[\\/]admin" -or
@@ -182,7 +183,7 @@ function Assert-CustomerPackageContents {
   }
 
   $quoteCollectorHit = $false
-  foreach ($rootPath in @((Join-Path $frontendOut ".next"), (Join-Path $frontendOut "server.js"))) {
+  foreach ($rootPath in @($frontendBuildOut, (Join-Path $frontendOut "server.js"))) {
     if (-not (Test-Path $rootPath)) { continue }
     $rootItem = Get-Item -LiteralPath $rootPath
     $files = if ($rootItem.PSIsContainer) {
@@ -201,15 +202,15 @@ function Assert-CustomerPackageContents {
   }
 
   $tradeConfirmationHit = $false
-  $tradeChunkRoots = @(
-    (Join-Path $frontendOut ".next\server\chunks\ssr"),
-    (Join-Path $frontendOut ".next\server\app\trade"),
-    (Join-Path $frontendOut ".next\static\chunks")
-  )
-  foreach ($rootPath in $tradeChunkRoots) {
+  foreach ($rootPath in @($frontendBuildOut, (Join-Path $frontendOut "server.js"))) {
     if (-not (Test-Path $rootPath)) { continue }
-    $files = Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -match "trade|app_trade_page" -or $_.FullName -match "[\\/]trade[\\/]" }
+    $rootItem = Get-Item -LiteralPath $rootPath
+    $files = if ($rootItem.PSIsContainer) {
+      Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch "[\\/]node_modules[\\/]" }
+    } else {
+      @($rootItem)
+    }
     $hits = $files | Select-String -Pattern "confirmation_token" -SimpleMatch -ErrorAction SilentlyContinue
     if ($hits) {
       $tradeConfirmationHit = $true
@@ -310,8 +311,10 @@ function Restore-DeveloperPythonDependencies {
 $releaseDir = Join-Path $repo $ReleaseRoot
 $appDir = Join-Path $releaseDir "MultiTrading"
 $frontendDir = Join-Path $repo "frontend"
-$standalone = Join-Path $frontendDir ".next\standalone"
-$static = Join-Path $frontendDir ".next\static"
+$customerNextDirName = ".next-customer"
+$customerNextDir = Join-Path $frontendDir $customerNextDirName
+$standalone = Join-Path $customerNextDir "standalone"
+$static = Join-Path $customerNextDir "static"
 $public = Join-Path $frontendDir "public"
 $launcherIconPath = Join-Path $repo "assets\windows\multitrading-logo.ico"
 $licensePublicKeyPath = Resolve-LicensePublicKeyPath
@@ -343,7 +346,7 @@ python (Join-Path $repo "scripts\make_windows_icon.py")
 Write-Host "[3/9] Building customer frontend (Next standalone)..."
 $standaloneServer = Join-Path $standalone "server.js"
 if ($ReuseFrontend -and (Test-Path $standaloneServer) -and (Test-Path $static)) {
-  Write-Host "[INFO] Reusing existing frontend\.next\standalone"
+  Write-Host "[INFO] Reusing existing frontend\$customerNextDirName\standalone"
 } else {
   Invoke-WithCustomerFrontendExclusions {
     Push-Location $frontendDir
@@ -352,11 +355,9 @@ if ($ReuseFrontend -and (Test-Path $standaloneServer) -and (Test-Path $static)) 
       $env:NEXT_PUBLIC_MT_BUILD_TARGET = "customer"
       $env:NEXT_PUBLIC_LOCAL_AGENT_API_BASE = "http://127.0.0.1:8010"
       $env:NEXT_TELEMETRY_DISABLED = "1"
-      Remove-Item -LiteralPath (Join-Path $frontendDir ".next") -Recurse -Force -ErrorAction SilentlyContinue
+      $env:NEXT_DIST_DIR = $customerNextDirName
+      Remove-Item -LiteralPath $customerNextDir -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath (Join-Path $frontendDir "tsconfig.tsbuildinfo") -Force -ErrorAction SilentlyContinue
-      if (Test-Path (Join-Path $frontendDir ".next\dev")) {
-        throw "frontend .next\dev cache is still present; stop the dev server before customer build."
-      }
       npm install
       npm run build
     } finally {
@@ -404,7 +405,7 @@ foreach ($sourceDir in @("app", "components", "lib", "convex")) {
 foreach ($sourceFile in @("next.config.js", "package-lock.json", "package.json", "postcss.config.js", "proxy.ts", "tailwind.config.js", "tsconfig.json", "tsconfig.tsbuildinfo")) {
   Remove-Item -LiteralPath (Join-Path $appDir "frontend\$sourceFile") -Force -ErrorAction SilentlyContinue
 }
-Copy-Dir $static (Join-Path $appDir "frontend\.next\static")
+Copy-Dir $static (Join-Path $appDir "frontend\$customerNextDirName\static")
 Copy-Dir $public (Join-Path $appDir "frontend\public")
 Assert-CustomerPackageContents
 
@@ -461,7 +462,7 @@ MultiTrading Customer Edition
 
 How to start:
 1. Double-click MultiTradingLauncher.exe.
-2. The browser opens http://127.0.0.1:3010.
+2. The launcher opens MultiTrading in an Edge/Chrome app window when available.
 3. Configure broker, market data, Feishu and other local settings in Setup.
 4. Import the local License issued by the administrator in Personal Center.
 

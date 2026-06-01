@@ -42,6 +42,7 @@ const labels = {
   news: "\u65b0\u95fb\u4fe1\u606f\u6d41",
   signals: "\u4fe1\u53f7\u4e2d\u5fc3",
   backtest: "\u56de\u6d4b\u4e2d\u5fc3",
+  autoTrading: "\u81ea\u52a8\u4ea4\u6613",
   research: "\u7814\u7a76\u4e2d\u5fc3",
   tradingAgents: "TradingAgents \u667a\u80fd\u4f53",
   agentStrategyLab: "Agent Strategy Lab",
@@ -49,13 +50,11 @@ const labels = {
   options: "\u671f\u6743\u4ea4\u6613",
   notifications: "\u901a\u77e5\u4e2d\u5fc3",
   billing: "\u8ba2\u8d2d\u4e0e\u5347\u7ea7",
-  orderAdmin: "\u6536\u6b3e\u8ba2\u5355",
-  licenseAdmin: "License \u53d1\u653e",
   expand: "\u5c55\u5f00\u5bfc\u822a\u6587\u5b57",
   collapse: "\u6536\u8d77\u4ec5\u663e\u793a\u56fe\u6807",
 };
 
-const items: NavItem[] = [
+const baseItems: NavItem[] = [
   {
     href: "/onboarding",
     label: labels.onboarding,
@@ -150,6 +149,20 @@ const items: NavItem[] = [
     ),
   },
   {
+    href: "/auto-trading",
+    label: labels.autoTrading,
+    icon: (
+      <Icon>
+        <path d="M7 7h10" />
+        <path d="M12 3v4" />
+        <rect x="4" y="9" width="16" height="10" rx="2" />
+        <path d="M8 14h.01M16 14h.01" />
+        <path d="M10 17h4" />
+        <path d="M2 14h2M20 14h2" />
+      </Icon>
+    ),
+  },
+  {
     href: "/research",
     label: labels.research,
     icon: (
@@ -235,9 +248,12 @@ const items: NavItem[] = [
       </Icon>
     ),
   },
+];
+
+const adminItems: NavItem[] = [
   {
     href: "/admin/orders",
-    label: labels.orderAdmin,
+    label: "\u6536\u6b3e\u8ba2\u5355",
     icon: (
       <Icon>
         <path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3z" />
@@ -249,7 +265,7 @@ const items: NavItem[] = [
   },
   {
     href: "/admin/licenses",
-    label: labels.licenseAdmin,
+    label: "License \u53d1\u653e",
     icon: (
       <Icon>
         <circle cx="7" cy="14" r="3" />
@@ -261,9 +277,11 @@ const items: NavItem[] = [
   },
 ];
 
+const items: NavItem[] = IS_CUSTOMER_BUILD ? baseItems : [...baseItems, ...adminItems];
+
 function isActivePath(pathname: string | null, href: string) {
   if (pathname === href) return true;
-  return false;
+  return href === "/auto-trading" && Boolean(pathname?.startsWith("/auto-trading/"));
 }
 
 export function Nav() {
@@ -293,7 +311,7 @@ export function Nav() {
   return (
     <aside
       className={clsx(
-        "sticky top-4 h-fit shrink-0 overflow-hidden rounded-2xl border border-slate-700/60 bg-slate-900/90 shadow-[0_18px_40px_rgba(2,6,23,0.45)] backdrop-blur-sm transition-[width,padding] duration-300 ease-out",
+        "sticky top-5 h-fit shrink-0 overflow-hidden rounded-lg border border-slate-700/60 bg-slate-900/90 shadow-[0_16px_34px_rgba(1,4,9,0.36)] backdrop-blur-sm transition-[width,padding] duration-300 ease-out",
         collapsed ? "w-[4.25rem] p-2" : "w-64 p-4"
       )}
     >
@@ -334,7 +352,7 @@ export function Nav() {
           aria-expanded={!collapsed}
           aria-label={collapsed ? labels.expand : labels.collapse}
           className={clsx(
-            "rounded-lg border border-slate-600/80 bg-slate-800/60 p-2 text-slate-300 transition hover:border-cyan-500/40 hover:bg-slate-800 hover:text-cyan-200",
+            "rounded-md border border-slate-600/80 bg-slate-800/60 p-2 text-slate-300 transition hover:border-teal-300/45 hover:bg-teal-400/10 hover:text-teal-100",
             collapsed ? "w-full" : "shrink-0"
           )}
         >
@@ -345,10 +363,7 @@ export function Nav() {
       </div>
 
       <nav className="space-y-1">
-        {items.filter((item) => {
-          if (!IS_CUSTOMER_BUILD) return true;
-          return !["/admin/orders", "/admin/licenses"].includes(item.href);
-        }).map((item) => {
+        {items.map((item) => {
           const active = isActivePath(pathname, item.href);
           return (
             <Link
@@ -356,11 +371,11 @@ export function Nav() {
               href={item.href}
               title={item.label}
               className={clsx(
-                "flex items-center gap-3 rounded-lg text-sm transition-all duration-200",
+                "flex items-center gap-3 rounded-md border border-transparent text-sm transition-all duration-200",
                 collapsed ? "justify-center px-2 py-2.5" : "px-3 py-2.5",
                 active
-                  ? "bg-gradient-to-r from-cyan-500 to-indigo-500 text-white shadow-md shadow-cyan-500/30"
-                  : "text-slate-300 hover:bg-slate-800/80 hover:text-slate-100"
+                  ? "border-teal-300/25 bg-teal-400/10 text-teal-50 shadow-[inset_3px_0_0_rgba(45,212,191,0.9)]"
+                  : "text-slate-300 hover:border-slate-600/60 hover:bg-teal-400/10 hover:text-slate-100"
               )}
             >
               {item.icon}

@@ -22,7 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const content = (
     <html lang="zh-CN">
       <body className="min-h-screen">
-        <div className="relative min-h-screen bg-[#08101d]">
+        <div className="app-canvas relative min-h-screen">
           <Suspense
             fallback={
               <div className="flex min-h-screen items-center justify-center text-sm text-slate-300">

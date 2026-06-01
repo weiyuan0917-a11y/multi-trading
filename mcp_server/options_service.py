@@ -654,6 +654,7 @@ def _iter_option_executions_for_range(
     today_fn = getattr(trade_ctx, "today_executions", None)
 
     def _norm_row(x: Any) -> dict[str, Any] | None:
+        oid = str(getattr(x, "order_id", "") or (x.get("order_id") if isinstance(x, dict) else "") or "").strip()
         sym = str(getattr(x, "symbol", "") or (x.get("symbol") if isinstance(x, dict) else "")).strip().upper()
         if not _is_option_symbol(sym):
             return None
@@ -665,7 +666,10 @@ def _iter_option_executions_for_range(
             ts = _to_int(getattr(x, "created_at", None), _to_int((x or {}).get("created_at"), 0))
         if not sym or side not in {"buy", "sell"} or qty <= 0 or price <= 0 or ts <= 0:
             return None
-        return {"symbol": sym, "side": side, "qty": qty, "price": price, "ts": ts}
+        out = {"symbol": sym, "side": side, "qty": qty, "price": price, "ts": ts}
+        if oid:
+            out["order_id"] = oid
+        return out
 
     if callable(hist_fn):
         start_dt = datetime.combine(from_date, datetime.min.time())
@@ -706,7 +710,7 @@ def _iter_option_executions_from_worker_logs(
     symbol_query: str | None = None,
 ) -> list[dict[str, Any]]:
     """
-    从 0DTE / 1DTE worker 决策尾日志提取期权成交（提交价口径）。
+    从 0DTE / 1DTE / 股票期权中长线 worker 日志提取期权成交（提交价口径）。
     仅在 API 不可用时兜底。
     """
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -718,6 +722,10 @@ def _iter_option_executions_from_worker_logs(
         (
             os.path.join(root, "data", "qqq_1dte", "live_worker_decision_tail.jsonl"),
             os.path.join(root, "data", "qqq_1dte", "live_worker_execution_ledger.jsonl"),
+        ),
+        (
+            os.path.join(root, "data", "stock_options_swing", "live_worker_decision_tail.jsonl"),
+            os.path.join(root, "data", "stock_options_swing", "live_worker_execution_ledger.jsonl"),
         ),
     ]
     sym_q = str(symbol_query or "").strip().upper()
@@ -757,7 +765,7 @@ def _iter_option_executions_from_worker_logs(
         if not day_key or not (from_date.isoformat() <= day_key <= to_date.isoformat()):
             return
         seen_order_ids.add(oid)
-        out.append({"symbol": sym, "side": side, "qty": qty, "price": price, "ts": ts})
+        out.append({"order_id": oid, "symbol": sym, "side": side, "qty": qty, "price": price, "ts": ts})
         if not from_ledger:
             pending_ledger_rows[ledger_path].append(
                 {
@@ -804,8 +812,64 @@ def _iter_option_executions_from_worker_logs(
         except Exception:
             return
 
+    def _extract_order_legs_from_response(resp: Any) -> list[dict[str, Any]]:
+        if not isinstance(resp, dict):
+            return []
+        legs: list[dict[str, Any]] = []
+        mode = str(resp.get("mode") or "").strip().lower()
+        if mode == "single_leg":
+            order = resp.get("order")
+            if isinstance(order, dict):
+                legs.append(order)
+        result = resp.get("result")
+        if isinstance(result, dict):
+            submitted = result.get("legs_submitted")
+            if isinstance(submitted, list):
+                legs.extend([x for x in submitted if isinstance(x, dict)])
+        submitted = resp.get("legs_submitted")
+        if isinstance(submitted, list):
+            legs.extend([x for x in submitted if isinstance(x, dict)])
+        return legs
+
+    def _parse_swing_event_row(row: dict[str, Any], ledger_fp: str) -> None:
+        event = str(row.get("event") or "").strip()
+        if event not in {"entry_submitted", "entry_partial_submitted", "exit_submitted", "spread_closed"}:
+            return
+        ts = _to_int(row.get("ts"), 0)
+        if ts <= 0:
+            ts = _parse_iso_ts(row.get("at"))
+        if ts <= 0:
+            return
+        legs = _extract_order_legs_from_response(row.get("response"))
+        if not legs:
+            order = row.get("order")
+            if isinstance(order, dict):
+                legs = _extract_order_legs_from_response(order)
+        if not legs:
+            return
+        for leg in legs:
+            _append_leg(leg, ts, ledger_fp, from_ledger=True)
+
     for _, ledger_fp in files:
         _parse_ledger(ledger_fp)
+
+    for _, ledger_fp in files:
+        if not os.path.isfile(ledger_fp) or "stock_options_swing" not in ledger_fp:
+            continue
+        try:
+            with open(ledger_fp, "r", encoding="utf-8") as f:
+                for line in f:
+                    ln = line.strip()
+                    if not ln:
+                        continue
+                    try:
+                        row = json.loads(ln)
+                    except Exception:
+                        continue
+                    if isinstance(row, dict):
+                        _parse_swing_event_row(row, ledger_fp)
+        except Exception:
+            continue
 
     for fp, ledger_fp in files:
         if not os.path.isfile(fp):
@@ -895,6 +959,24 @@ def get_option_pnl_calendar(
     executions: list[dict[str, Any]] = []
     execution_source = "-"
     log_exec_count = 0
+    seen_exec_keys: set[tuple[str, str, int, int, int]] = set()
+    seen_order_ids: set[str] = set()
+
+    def _exec_key(row: dict[str, Any]) -> tuple[str, str, int, int, int]:
+        return (
+            str(row.get("symbol", "")),
+            str(row.get("side", "")),
+            int(row.get("qty", 0)),
+            int(round(float(row.get("price", 0.0)) * 10000)),
+            int(row.get("ts", 0)),
+        )
+
+    def _remember_exec(row: dict[str, Any]) -> None:
+        seen_exec_keys.add(_exec_key(row))
+        oid = str(row.get("order_id") or "").strip()
+        if oid:
+            seen_order_ids.add(oid)
+
     try:
         log_exec_rows = _iter_option_executions_from_worker_logs(
             from_date=d0,
@@ -917,6 +999,7 @@ def get_option_pnl_calendar(
                     "price": float(r["price"]),
                     "fee_per_contract": _estimate_fee_per_contract(_side, _qty),
                     "ts": int(r["ts"]),
+                    "order_id": str(r.get("order_id") or "").strip(),
                 }
             )
         if executions:
@@ -925,17 +1008,8 @@ def get_option_pnl_calendar(
     except Exception:
         pass
 
-    seen_exec_keys: set[tuple[str, str, int, int, int]] = set()
     for e in executions:
-        seen_exec_keys.add(
-            (
-                str(e.get("symbol", "")),
-                str(e.get("side", "")),
-                int(e.get("qty", 0)),
-                int(round(float(e.get("price", 0.0)) * 10000)),
-                int(e.get("ts", 0)),
-            )
-        )
+        _remember_exec(e)
 
     # ── 第 2 层：history_executions API（做增量补全）────────────────────────────
     api_exec_count = 0
@@ -944,6 +1018,9 @@ def get_option_pnl_calendar(
         for r in direct_exec_rows:
             day_key = _to_date_key(r.get("ts"), tz_name)
             if not day_key or not (d0.isoformat() <= day_key <= d1.isoformat()):
+                continue
+            oid = str(r.get("order_id") or "").strip()
+            if oid and oid in seen_order_ids:
                 continue
             key = (
                 str(r["symbol"]),
@@ -964,74 +1041,127 @@ def get_option_pnl_calendar(
                     "price": float(r["price"]),
                     "fee_per_contract": _estimate_fee_per_contract(str(r["side"]), int(r["qty"])),
                     "ts": int(r["ts"]),
+                    "order_id": oid,
                 }
             )
+            _remember_exec(executions[-1])
             api_exec_count += 1
         if execution_source == "-" and executions:
             execution_source = "history_executions"
     except Exception:
         pass
 
-    # ── 第 3 层：order_detail API（逐单拉取，最慢）────────────────────────────
+    # ── 第 3 层：order_detail API（逐单拉取，最慢；作为增量补全）───────────────
     orders_scanned = 0
     details_loaded = 0
     fallback_executions = 0
-    if not executions:
-        try:
-            all_orders = _iter_option_orders_for_range(trade_ctx)
-            orders_scanned = len(all_orders)
-            for o in all_orders:
-                oid = str(getattr(o, "order_id", "") or "")
-                if not oid:
+    detail_exec_count = 0
+    try:
+        all_orders = _iter_option_orders_for_range(trade_ctx)
+        orders_scanned = len(all_orders)
+        pre_detail_order_ids = set(seen_order_ids)
+
+        def _append_order_detail_exec(
+            *,
+            day_key: str,
+            symbol: str,
+            side: str,
+            qty: int,
+            price: float,
+            fee_per_contract: float,
+            ts: int,
+            order_id: str,
+        ) -> bool:
+            if not day_key or not (d0.isoformat() <= day_key <= d1.isoformat()):
+                return False
+            if not symbol or side not in {"buy", "sell"} or qty <= 0 or price <= 0 or ts <= 0:
+                return False
+            candidate = {
+                "day": day_key,
+                "symbol": symbol,
+                "side": side,
+                "qty": int(qty),
+                "price": float(price),
+                "fee_per_contract": float(fee_per_contract),
+                "ts": int(ts),
+                "order_id": str(order_id or "").strip(),
+            }
+            if _exec_key(candidate) in seen_exec_keys:
+                return False
+            executions.append(candidate)
+            _remember_exec(candidate)
+            return True
+
+        for o in all_orders:
+            oid = str(getattr(o, "order_id", "") or "")
+            if not oid or oid in pre_detail_order_ids:
+                continue
+            try:
+                detail = broker_service.get_order_detail(trade_ctx, oid)
+            except Exception:
+                continue
+            try:
+                sym = str(getattr(detail, "symbol", "") or getattr(o, "symbol", "") or "").strip().upper()
+                if sym_q and sym_q not in sym:
                     continue
-                try:
-                    detail = broker_service.get_order_detail(trade_ctx, oid)
-                except Exception:
+                _side = _normalize_side(getattr(detail, "side", "") or getattr(o, "side", ""))
+                qty_total = max(0, _to_int(getattr(detail, "executed_quantity", 0), 0))
+                if qty_total <= 0 or not sym or _side not in {"buy", "sell"}:
                     continue
-                try:
-                    sym = str(getattr(detail, "symbol", "") or getattr(o, "symbol", "") or "").strip().upper()
-                    if sym_q and sym_q not in sym:
-                        continue
-                    _side = _normalize_side(getattr(detail, "side", "") or getattr(o, "side", ""))
-                    qty_total = max(0, _to_int(getattr(detail, "executed_quantity", 0), 0))
-                    if qty_total <= 0 or not sym or _side not in {"buy", "sell"}:
-                        continue
-                    charge = _extract_charge_total_amount(detail)
-                    fee_pc = charge / qty_total if qty_total > 0 else 0.0
-                    details_loaded += 1
-                    matched = 0
-                    for h in list(getattr(detail, "history", None) or []):
-                        try:
-                            hs = str(getattr(h, "status", "") or (h.get("status") if isinstance(h, dict) else "")).lower()
-                            if hs and ("filled" not in hs and "execut" not in hs and "partial" not in hs):
-                                continue
-                            q = max(0, _to_int(getattr(h, "quantity", None), _to_int((h or {}).get("quantity"), 0)))
-                            p = _to_float(getattr(h, "price", None), _to_float((h or {}).get("price"), 0.0))
-                            t = getattr(h, "time", None) or (h.get("time") if isinstance(h, dict) else None)
-                            if q <= 0 or p <= 0:
-                                continue
-                            day_key = _to_date_key(t, tz_name)
-                            if not day_key:
-                                continue
-                            executions.append({"day": day_key, "symbol": sym, "side": _side,
-                                               "qty": q, "price": p, "fee_per_contract": fee_pc, "ts": _to_int(t, 0)})
-                            matched += 1
-                        except Exception:
+                charge = _extract_charge_total_amount(detail)
+                fee_pc = charge / qty_total if qty_total > 0 else 0.0
+                details_loaded += 1
+                matched = 0
+                for h in list(getattr(detail, "history", None) or []):
+                    try:
+                        hs = str(getattr(h, "status", "") or (h.get("status") if isinstance(h, dict) else "")).lower()
+                        if hs and ("filled" not in hs and "execut" not in hs and "partial" not in hs):
                             continue
-                    if matched == 0:
-                        p2 = _to_float(getattr(detail, "executed_price", 0), 0.0)
-                        t2 = _to_int(getattr(detail, "updated_at", 0), 0) or _to_int(getattr(detail, "submitted_at", 0), 0)
-                        dk2 = _to_date_key(t2, tz_name)
-                        if p2 > 0 and dk2:
-                            executions.append({"day": dk2, "symbol": sym, "side": _side,
-                                               "qty": qty_total, "price": p2, "fee_per_contract": fee_pc, "ts": t2})
+                        q = max(0, _to_int(getattr(h, "quantity", None), _to_int((h or {}).get("quantity"), 0)))
+                        p = _to_float(getattr(h, "price", None), _to_float((h or {}).get("price"), 0.0))
+                        t = getattr(h, "time", None) or (h.get("time") if isinstance(h, dict) else None)
+                        if q <= 0 or p <= 0:
+                            continue
+                        day_key = _to_date_key(t, tz_name)
+                        added = _append_order_detail_exec(
+                            day_key=day_key,
+                            symbol=sym,
+                            side=_side,
+                            qty=q,
+                            price=p,
+                            fee_per_contract=fee_pc,
+                            ts=_to_int(t, 0),
+                            order_id=oid,
+                        )
+                        if added:
                             fallback_executions += 1
-                except Exception:
-                    continue
-            if executions:
-                execution_source = "order_detail"
-        except Exception:
-            pass
+                            detail_exec_count += 1
+                        matched += 1
+                    except Exception:
+                        continue
+                if matched == 0:
+                    p2 = _to_float(getattr(detail, "executed_price", 0), 0.0)
+                    t2 = _to_int(getattr(detail, "updated_at", 0), 0) or _to_int(getattr(detail, "submitted_at", 0), 0)
+                    dk2 = _to_date_key(t2, tz_name)
+                    added = _append_order_detail_exec(
+                        day_key=dk2,
+                        symbol=sym,
+                        side=_side,
+                        qty=qty_total,
+                        price=p2,
+                        fee_per_contract=fee_pc,
+                        ts=t2,
+                        order_id=oid,
+                    )
+                    if added:
+                        fallback_executions += 1
+                        detail_exec_count += 1
+            except Exception:
+                continue
+        if execution_source == "-" and executions:
+            execution_source = "order_detail"
+    except Exception:
+        pass
 
     executions.sort(key=lambda x: (x["ts"], x["symbol"]))
     long_pos: dict[str, deque[dict[str, float]]] = defaultdict(deque)
@@ -1143,6 +1273,7 @@ def get_option_pnl_calendar(
             "executions_parsed": len(executions),
             "api_executions_added": int(api_exec_count),
             "fallback_executions": int(fallback_executions),
+            "order_detail_executions_added": int(detail_exec_count),
             "execution_source": execution_source,
             "log_executions": int(log_exec_count),
         },

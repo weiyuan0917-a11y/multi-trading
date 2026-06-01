@@ -235,7 +235,7 @@ export function ClerkAuthShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="relative mx-auto flex min-h-screen max-w-[1440px] gap-6 p-6">
+    <div className="app-frame">
       {CONVEX_ENABLED ? <ConvexUserSync /> : null}
       <Nav />
       <main className="min-w-0 flex-1">

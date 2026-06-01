@@ -94,7 +94,7 @@ export function LocalAuthShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="relative mx-auto flex min-h-screen max-w-[1440px] gap-6 p-6">
+    <div className="app-frame">
       <Nav />
       <main className="min-w-0 flex-1">
         <TopBar />

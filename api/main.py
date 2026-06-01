@@ -1954,8 +1954,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return val in {"1", "true", "yes", "on"}
 
 
-def _ensure_l3_confirmation(token: str | None) -> None:
-    _service_ensure_l3_confirmation(token)
+def _ensure_l3_confirmation(token: str | None, owner_id: str | None = None) -> None:
+    _service_ensure_l3_confirmation(token, owner_id=owner_id, root=Path(ROOT))
 
 
 def _load_env_file(path: str) -> dict[str, str]:

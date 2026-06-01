@@ -76,6 +76,7 @@ from api.services import (
     stop_all_services,
     stop_services,
 )
+from api.services.trade_permissions import l3_confirmation_status
 from api.services.option_short_guard import is_opening_short_options_allowed, validate_option_sell_covered
 from api.services.backtest_task_service import get_backtest_events, get_backtest_task, list_backtest_tasks, run_sync_backtest_task
 from api.services.cn_market_data_service import get_cn_market_data_service
@@ -2014,19 +2015,12 @@ def _context_mismatch_runtime(raw: dict[str, Any] | None, context: dict[str, str
     }
 
 
-def _auto_trading_l3_status(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    max_level = str(os.getenv("OPENCLAW_MCP_MAX_LEVEL", "L2") or "L2").strip().upper()
-    allow_l3 = str(os.getenv("OPENCLAW_MCP_ALLOW_L3", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
-    env_token_configured = bool(str(os.getenv("OPENCLAW_MCP_L3_CONFIRMATION_TOKEN", "") or "").strip())
-    cfg_token_configured = bool(str((config or {}).get("confirmation_token") or "").strip())
-    return {
-        "max_level": max_level,
-        "allow_l3": allow_l3,
-        "env_token_configured": env_token_configured,
-        "module_token_configured": cfg_token_configured,
-        "required_for_live_order": True,
-        "ready": bool(max_level == "L3" and allow_l3 and (env_token_configured or cfg_token_configured)),
-    }
+def _auto_trading_l3_status(config: dict[str, Any] | None = None, owner_id: str | None = None) -> dict[str, Any]:
+    return l3_confirmation_status(
+        owner_id=owner_id,
+        root=Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[1]),
+        config_token=str((config or {}).get("confirmation_token") or "").strip() or None,
+    )
 
 
 def _auto_trading_option_config(module_id: str, owner_id: str | None = None) -> dict[str, Any]:
@@ -2106,7 +2100,7 @@ def _auto_trading_module_status_from_services(
         "runtime": runtime,
         "last_error": runtime.get("last_error") or inner.get("last_error"),
         "updated_at": runtime.get("updated_at") or inner.get("updated_at") or inner.get("loop_started"),
-        "l3": _auto_trading_l3_status(cfg),
+        "l3": _auto_trading_l3_status(cfg, owner_id=owner_id),
         **status_extra,
     }
 
@@ -2254,7 +2248,12 @@ def auto_trading_module_risk_summary(module_id: str, owner_id: str | None = None
                 "last_position": runtime.get("position") or runtime.get("open_position"),
                 "last_decision": runtime.get("decision") or runtime.get("last_decision"),
             }
-    return {"ok": True, "module_id": mid, "risk": summary, "l3": _auto_trading_l3_status(cfg if isinstance(cfg, dict) else {})}
+    return {
+        "ok": True,
+        "module_id": mid,
+        "risk": summary,
+        "l3": _auto_trading_l3_status(cfg if isinstance(cfg, dict) else {}, owner_id=owner_id),
+    }
 
 
 def auto_trading_module_events(module_id: str, limit: int = 50, owner_id: str | None = None) -> dict[str, Any]:
@@ -2292,13 +2291,13 @@ def auto_trading_module_confirm(module_id: str, body: dict[str, Any]) -> dict[st
             "module_id": mid,
             "result": auto_trader_confirm(signal_id, {"confirmation_token": token}, owner_id=payload.get("owner_id")),
         }
-    _m()._ensure_l3_confirmation(token)
+    _m()._ensure_l3_confirmation(token, owner_id=payload.get("owner_id"))
     return {
         "ok": True,
         "module_id": mid,
         "confirmed": True,
         "message": "L3 confirmation accepted for this module. Option live orders continue to use the module worker config token.",
-        "l3": _auto_trading_l3_status(_auto_trading_option_config(mid, owner_id=payload.get("owner_id"))),
+        "l3": _auto_trading_l3_status(_auto_trading_option_config(mid, owner_id=payload.get("owner_id")), owner_id=payload.get("owner_id")),
     }
 
 
@@ -2931,7 +2930,7 @@ def options_fee_estimate(body: dict[str, Any]) -> dict[str, Any]:
 def options_order(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
     parsed = OptionOrderBody.model_validate(body if isinstance(body, dict) else {})
-    m._ensure_l3_confirmation(parsed.confirmation_token)
+    m._ensure_l3_confirmation(parsed.confirmation_token, owner_id=owner_id)
     qctx, tctx = m.ensure_contexts(parsed.account_id, owner_id=owner_id)
     bl = m.broker_get_account_balance(tctx)
     b = bl[0] if bl else None
@@ -4410,7 +4409,7 @@ def trade_order_detail(order_id: str, account_id: str | None = None, owner_id: s
 def trade_submit_order(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
     m = _m()
     parsed = SubmitOrderBody.model_validate(body if isinstance(body, dict) else {})
-    m._ensure_l3_confirmation(parsed.confirmation_token)
+    m._ensure_l3_confirmation(parsed.confirmation_token, owner_id=owner_id)
     qctx, tctx = m.ensure_contexts(parsed.account_id, owner_id=owner_id)
     normalized_qty, lot_size = _normalize_quantity_by_lot_size(qctx, parsed.symbol, parsed.quantity)
     qty_adjusted = int(normalized_qty) != int(parsed.quantity)

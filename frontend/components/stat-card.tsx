@@ -4,7 +4,7 @@ export function StatCard({ title, value, sub }: { title: string; value: string |
   return (
     <div className="metric-card">
       <div className="field-label">{title}</div>
-      <div className="mt-1 text-3xl font-semibold tracking-tight text-slate-900">{value}</div>
+      <div className="mt-1 text-3xl font-semibold tracking-normal text-slate-900">{value}</div>
       {sub ? <div className="mt-1 text-xs text-slate-500">{sub}</div> : null}
     </div>
   );

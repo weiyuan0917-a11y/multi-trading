@@ -145,8 +145,14 @@ export default function OptionsPage() {
     (path: string) => apiGet<any>(path),
     buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
   );
+  const today = useMemo(() => new Date(), []);
   const fromDate = ymd(monthStart(calendarMonth));
   const toDate = ymd(monthEnd(calendarMonth));
+  const currentMonth = useMemo(() => monthStart(today), [today]);
+  const currentMonthFromDate = ymd(currentMonth);
+  const currentMonthToDate = ymd(monthEnd(currentMonth));
+  const currentYearFromDate = ymd(new Date(today.getFullYear(), 0, 1));
+  const currentYearToDate = ymd(today);
   const pnlSymbolQuery = pnlSymbolFilter.trim().toUpperCase();
   const pnlApiPath = `/options/pnl-calendar?from_date=${fromDate}&to_date=${toDate}&tz=${encodeURIComponent(
     "America/New_York"
@@ -160,6 +166,32 @@ export default function OptionsPage() {
     (path: string) => apiGet<any>(path),
     buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
   );
+  const currentYearPnlApiPath = `/options/pnl-calendar?from_date=${currentYearFromDate}&to_date=${currentYearToDate}&tz=${encodeURIComponent(
+    "America/New_York"
+  )}${pnlSymbolQuery ? `&symbol=${encodeURIComponent(pnlSymbolQuery)}` : ""}${
+    accountQuery ? `&${accountQuery}` : ""
+  }${
+    pnlRefreshNonce ? `&_t=${pnlRefreshNonce}` : ""
+  }`;
+  const { data: currentYearPnlResp } = useSWR(
+    canTradeOptions && currentYearPnlApiPath !== pnlApiPath ? currentYearPnlApiPath : null,
+    (path: string) => apiGet<any>(path),
+    buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
+  );
+  const effectiveCurrentYearPnlResp = currentYearPnlApiPath === pnlApiPath ? pnlResp : currentYearPnlResp;
+  const currentMonthPnlApiPath = `/options/pnl-calendar?from_date=${currentMonthFromDate}&to_date=${currentMonthToDate}&tz=${encodeURIComponent(
+    "America/New_York"
+  )}${pnlSymbolQuery ? `&symbol=${encodeURIComponent(pnlSymbolQuery)}` : ""}${
+    accountQuery ? `&${accountQuery}` : ""
+  }${
+    pnlRefreshNonce ? `&_t=${pnlRefreshNonce}` : ""
+  }`;
+  const { data: currentMonthPnlResp } = useSWR(
+    canTradeOptions && currentMonthPnlApiPath !== pnlApiPath ? currentMonthPnlApiPath : null,
+    (path: string) => apiGet<any>(path),
+    buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
+  );
+  const effectiveCurrentMonthPnlResp = currentMonthPnlApiPath === pnlApiPath ? pnlResp : currentMonthPnlResp;
   const orders: any[] = ordersResp?.orders || [];
   const positions: any[] = positionsResp?.positions || [];
   const pnlDays: OptionPnlDay[] = pnlResp?.days || [];
@@ -705,17 +737,37 @@ export default function OptionsPage() {
           })}
         </div>
         <div className="rounded border border-slate-700/70 p-2 text-xs text-slate-400">
-          月累计：已实现收益{" "}
+          本年累计：已实现收益{" "}
           <span
-            className={`${Number(pnlResp?.summary?.total_realized_pnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+            className={`${
+              Number(effectiveCurrentYearPnlResp?.summary?.total_realized_pnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"
+            }`}
           >
-            {fmtUsd(Number(pnlResp?.summary?.total_realized_pnl ?? 0))}
+            {fmtUsd(Number(effectiveCurrentYearPnlResp?.summary?.total_realized_pnl ?? 0))}
           </span>
           {" · "}
           收益率{" "}
-          {pnlResp?.summary?.total_realized_return_pct == null ? "—" : `${Number(pnlResp.summary.total_realized_return_pct).toFixed(2)}%`}
+          {effectiveCurrentYearPnlResp?.summary?.total_realized_return_pct == null
+            ? "—"
+            : `${Number(effectiveCurrentYearPnlResp.summary.total_realized_return_pct).toFixed(2)}%`}
           {" · "}
-          已平仓 {Number(pnlResp?.summary?.total_closed_contracts ?? 0)} 张
+          已平仓 {Number(effectiveCurrentYearPnlResp?.summary?.total_closed_contracts ?? 0)} 张
+          {" · "}
+          本月累计：已实现收益{" "}
+          <span
+            className={`${
+              Number(effectiveCurrentMonthPnlResp?.summary?.total_realized_pnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"
+            }`}
+          >
+            {fmtUsd(Number(effectiveCurrentMonthPnlResp?.summary?.total_realized_pnl ?? 0))}
+          </span>
+          {" · "}
+          收益率{" "}
+          {effectiveCurrentMonthPnlResp?.summary?.total_realized_return_pct == null
+            ? "—"
+            : `${Number(effectiveCurrentMonthPnlResp.summary.total_realized_return_pct).toFixed(2)}%`}
+          {" · "}
+          已平仓 {Number(effectiveCurrentMonthPnlResp?.summary?.total_closed_contracts ?? 0)} 张
         </div>
         <div className="text-[11px] text-slate-500">
           数据诊断：订单 {Number(pnlResp?.debug?.orders_scanned ?? 0)}，详情 {Number(pnlResp?.debug?.order_details_loaded ?? 0)}，

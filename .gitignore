@@ -36,6 +36,7 @@ __pycache__/
 # --- Node / Next.js ---
 frontend/node_modules/
 frontend/.next/
+frontend/.next-customer/
 frontend/out/
 frontend/tsconfig.tsbuildinfo
 npm-debug.log*
