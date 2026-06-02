@@ -70,6 +70,7 @@ def test_pnl_calendar_order_detail_supplements_when_worker_logs_exist(monkeypatc
     symbol = "AAPL260619C200000.US"
     buy_ts = _ts("2026-06-01T14:30:00")
     sell_ts = _ts("2026-06-01T16:30:00")
+    monkeypatch.setattr(svc, "_estimate_fee_per_contract", lambda *_args, **_kwargs: 0.0)
 
     monkeypatch.setattr(
         svc,
@@ -129,3 +130,65 @@ def test_pnl_calendar_order_detail_supplements_when_worker_logs_exist(monkeypatc
     assert day["closed_contracts"] == 1
     assert result["debug"]["execution_source"] == "worker_logs"
     assert result["debug"]["order_detail_executions_added"] == 2
+
+
+def test_pnl_calendar_accepts_datetime_execution_times(monkeypatch) -> None:
+    symbol = "AAPL260619C200000.US"
+    buy_time = datetime(2026, 6, 1, 14, 30, tzinfo=timezone.utc)
+    sell_time = datetime(2026, 6, 1, 16, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(svc, "_estimate_fee_per_contract", lambda *_args, **_kwargs: 0.0)
+
+    monkeypatch.setattr(svc, "_iter_option_executions_from_worker_logs", lambda **_: [])
+    monkeypatch.setattr(
+        svc,
+        "_iter_option_executions_for_range",
+        lambda *_, **__: [
+            {"order_id": "buy-1", "symbol": symbol, "side": "buy", "qty": 1, "price": 2.0, "ts": buy_time},
+            {"order_id": "sell-1", "symbol": symbol, "side": "sell", "qty": 1, "price": 3.0, "ts": sell_time},
+        ],
+    )
+    monkeypatch.setattr(svc, "_iter_option_orders_for_range", lambda *_, **__: [])
+
+    result = svc.get_option_pnl_calendar(
+        SimpleNamespace(),
+        from_date="2026-06-01",
+        to_date="2026-06-01",
+        tz_name="UTC",
+    )
+
+    day = result["days"][0]
+    assert day["realized_pnl"] == 100.0
+    assert day["closed_contracts"] == 1
+    assert result["debug"]["execution_source"] == "history_executions"
+
+
+def test_pnl_calendar_summary_only_suppresses_day_payload(monkeypatch) -> None:
+    symbol = "AAPL260619C200000.US"
+    buy_ts = _ts("2026-06-01T14:30:00")
+    sell_ts = _ts("2026-06-02T16:30:00")
+    monkeypatch.setattr(svc, "_estimate_fee_per_contract", lambda *_args, **_kwargs: 0.0)
+
+    monkeypatch.setattr(svc, "_iter_option_executions_from_worker_logs", lambda **_: [])
+    monkeypatch.setattr(
+        svc,
+        "_iter_option_executions_for_range",
+        lambda *_, **__: [
+            {"order_id": "buy-1", "symbol": symbol, "side": "buy", "qty": 1, "price": 2.0, "ts": buy_ts},
+            {"order_id": "sell-1", "symbol": symbol, "side": "sell", "qty": 1, "price": 3.0, "ts": sell_ts},
+        ],
+    )
+    monkeypatch.setattr(svc, "_iter_option_orders_for_range", lambda *_, **__: [])
+
+    result = svc.get_option_pnl_calendar(
+        SimpleNamespace(),
+        from_date="2026-06-01",
+        to_date="2026-06-30",
+        tz_name="UTC",
+        summary_only=True,
+    )
+
+    assert result["days"] == []
+    assert result["details_by_date"] == {}
+    assert result["summary"]["total_realized_pnl"] == 100.0
+    assert result["summary"]["total_closed_contracts"] == 1
+    assert result["debug"]["summary_only"] is True

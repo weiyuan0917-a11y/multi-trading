@@ -76,7 +76,7 @@ from api.services import (
     stop_all_services,
     stop_services,
 )
-from api.services.trade_permissions import l3_confirmation_status
+from api.services.trade_permissions import l3_confirmation_status, resolve_l3_confirmation_token
 from api.services.option_short_guard import is_opening_short_options_allowed, validate_option_sell_covered
 from api.services.backtest_task_service import get_backtest_events, get_backtest_task, list_backtest_tasks, run_sync_backtest_task
 from api.services.cn_market_data_service import get_cn_market_data_service
@@ -1006,6 +1006,7 @@ def setup_services_status(owner_id: str | None = None) -> dict[str, Any]:
             qqq_1dte_live_runtime=m._qqq_1dte_live_runtime_status(owner_id=owner_id),
             stock_options_swing_worker_pid_file=m.STOCK_OPTIONS_SWING_WORKER_PID_FILE,
             stock_options_swing_runtime=m._stock_options_swing_runtime_status(owner_id=owner_id),
+            stock_options_swing_pid_validator=m._is_stock_options_swing_worker_script_pid,
         )
         with _setup_services_status_cache_lock:
             _setup_services_status_cache_by_owner[cache_key] = (
@@ -1837,7 +1838,7 @@ def setup_start_services(body: dict[str, Any], owner_id: str | None = None) -> d
             cfgs = stock_options_swing_config_get(owner_id=owner_id)
             cfgs_account_id = str((cfgs or {}).get("account_id") or "").strip() or None
             _assert_account_connected_for_start("stock_options_swing", cfgs_account_id)
-    return start_services(
+    result = start_services(
         start_feishu_bot=bool(parsed.start_feishu_bot),
         enable_auto_trader=bool(parsed.enable_auto_trader),
         enable_qqq_0dte_live=bool(parsed.enable_qqq_0dte_live),
@@ -1854,6 +1855,8 @@ def setup_start_services(body: dict[str, Any], owner_id: str | None = None) -> d
         win_subprocess_silent_kwargs=m._win_subprocess_silent_kwargs,
         owner_id=owner_id,
     )
+    _clear_setup_services_status_cache(owner_id)
+    return result
 
 
 def setup_stop_services(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
@@ -1868,7 +1871,7 @@ def setup_stop_services(body: dict[str, Any], owner_id: str | None = None) -> di
     # Stop is a defensive operation. If a global worker is still alive after an
     # account switch, allow the current owner to stop it even when the runtime
     # snapshot belongs to the previous account context.
-    return stop_services(
+    result = stop_services(
         stop_auto_trader=bool(parsed.stop_auto_trader),
         stop_qqq_0dte_live=bool(parsed.stop_qqq_0dte_live),
         stop_qqq_1dte_live=bool(parsed.stop_qqq_1dte_live),
@@ -1883,6 +1886,8 @@ def setup_stop_services(body: dict[str, Any], owner_id: str | None = None) -> di
         wait_auto_trader_stopped=m._wait_auto_trader_processes_stopped,
         stop_confirm_timeout_seconds=8.0,
     )
+    _clear_setup_services_status_cache(owner_id)
+    return result
 
 
 def setup_stop_all_services(body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
@@ -2020,6 +2025,14 @@ def _auto_trading_l3_status(config: dict[str, Any] | None = None, owner_id: str 
         owner_id=owner_id,
         root=Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[1]),
         config_token=str((config or {}).get("confirmation_token") or "").strip() or None,
+    )
+
+
+def _configured_l3_confirmation_token(config: dict[str, Any] | None = None, owner_id: str | None = None) -> str:
+    return resolve_l3_confirmation_token(
+        str((config or {}).get("confirmation_token") or "").strip() or None,
+        owner_id=owner_id,
+        root=Path(os.getenv("MULTITRADING_ROOT") or Path(__file__).resolve().parents[1]),
     )
 
 
@@ -2980,18 +2993,33 @@ def options_pnl_calendar(
     to_date: str,
     tz: str = "America/New_York",
     symbol: str | None = None,
+    summary_only: bool = False,
     account_id: str | None = None,
     owner_id: str | None = None,
 ) -> dict[str, Any]:
     m = _m()
-    _, tctx = m.ensure_contexts(account_id, owner_id=owner_id)
-    return m.svc_get_option_pnl_calendar(
+    tctx = None
+    broker_error_detail: dict[str, Any] | None = None
+    try:
+        _, tctx = m.ensure_contexts(account_id, owner_id=owner_id)
+    except Exception as e:
+        if not m._is_longport_connect_error(e):
+            raise
+        broker_error_detail = _broker_connect_error_detail(e, account_id=account_id, owner_id=owner_id)
+    result = m.svc_get_option_pnl_calendar(
         tctx,
         from_date=str(from_date).strip(),
         to_date=str(to_date).strip(),
         tz_name=str(tz or "America/New_York").strip() or "America/New_York",
         symbol_query=str(symbol or "").strip() or None,
+        summary_only=bool(summary_only),
     )
+    if broker_error_detail and isinstance(result, dict):
+        debug = result.setdefault("debug", {})
+        if isinstance(debug, dict):
+            debug["broker_connect_unavailable"] = True
+            debug["broker_connect_error"] = broker_error_detail
+    return result
 
 
 def _parse_option_expiry_iso(expiry_raw: str) -> datetime:
@@ -3697,7 +3725,10 @@ def stock_options_swing_config_put(body: dict[str, Any], owner_id: str | None = 
     after_dry_run = bool(payload.get("dry_run", cur.get("dry_run", True)))
     after_auto_submit = bool(payload.get("auto_submit_orders", cur.get("auto_submit_orders", False)))
     after_live_submit = (not after_dry_run) and after_auto_submit
-    if after_live_submit and not str(payload.get("confirmation_token") or cur.get("confirmation_token") or "").strip():
+    if after_live_submit and not _configured_l3_confirmation_token(
+        {"confirmation_token": payload.get("confirmation_token") or cur.get("confirmation_token")},
+        owner_id=owner_id,
+    ):
         raise HTTPException(status_code=400, detail="confirmation_token_required_for_live_auto_submit")
     if after_live_submit and not before_live_submit:
         phrase = str(payload.get("live_submit_confirm") or "").strip()
@@ -3779,14 +3810,14 @@ def stock_options_swing_refresh_positions_runtime(owner_id: str | None = None) -
     merged = dict(existing)
     merged.update(snapshot)
     merged["updated_at"] = datetime.now(timezone.utc).isoformat()
-    merged["position_snapshot_refreshed_by"] = "manual_position_action"
-    if "worker_running" not in merged:
-        pid = read_pid_file(m.STOCK_OPTIONS_SWING_WORKER_PID_FILE)
-        merged["worker_running"] = bool(pid and is_pid_alive(pid))
-    if "pid" not in merged:
-        pid = read_pid_file(m.STOCK_OPTIONS_SWING_WORKER_PID_FILE)
-        if pid:
-            merged["pid"] = pid
+    merged["position_snapshot_refreshed_by"] = "manual_position_refresh"
+    pid = read_pid_file(m.STOCK_OPTIONS_SWING_WORKER_PID_FILE)
+    pid_is_worker = bool(pid and m._is_stock_options_swing_worker_script_pid(pid))
+    merged["worker_running"] = pid_is_worker
+    if pid_is_worker:
+        merged["pid"] = pid
+    else:
+        merged.pop("pid", None)
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)

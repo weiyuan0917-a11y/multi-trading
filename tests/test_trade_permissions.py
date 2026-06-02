@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from api.services.trade_permissions import ensure_l3_confirmation, l3_confirmation_status
+from api.services.trade_permissions import ensure_l3_confirmation, l3_confirmation_status, resolve_l3_confirmation_token
 from config.user_env_store import save_user_env
 
 
@@ -95,6 +95,34 @@ class TestTradePermissions(unittest.TestCase):
         self.assertTrue(status["ready"])
         self.assertTrue(status["user_token_configured"])
         self.assertEqual("L3", status["max_level"])
+
+    def test_resolve_l3_confirmation_token_prefers_explicit_value(self):
+        self._clear_l3_env()
+        save_user_env(
+            "alice",
+            {
+                "OPENCLAW_MCP_L3_CONFIRMATION_TOKEN": "saved-token",
+            },
+            self.root,
+        )
+
+        token = resolve_l3_confirmation_token("typed-token", owner_id="alice", root=self.root)
+
+        self.assertEqual("typed-token", token)
+
+    def test_resolve_l3_confirmation_token_reads_owner_user_env(self):
+        self._clear_l3_env()
+        save_user_env(
+            "alice",
+            {
+                "OPENCLAW_MCP_L3_CONFIRMATION_TOKEN": "saved-token",
+            },
+            self.root,
+        )
+
+        token = resolve_l3_confirmation_token(owner_id="alice", root=self.root)
+
+        self.assertEqual("saved-token", token)
 
 
 if __name__ == "__main__":

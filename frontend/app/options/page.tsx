@@ -36,6 +36,9 @@ function formatOptionLast(q: OptionLegQuote | null | undefined): string {
 
 const fmtUsd = (v: number) =>
   Number.isFinite(v) ? v.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) : "—";
+const PNL_CALENDAR_SWROPTS = buildSwrOptions(0, SWR_INTERVALS.slowMetadata.dedupingInterval, {
+  errorRetryCount: 0,
+});
 
 function optionQuoteTitle(side: string, q: OptionLegQuote | null | undefined): string | undefined {
   if (!q?.timestamp && q?.prev_close == null && (q?.volume == null || q.volume === 0)) return undefined;
@@ -129,6 +132,7 @@ export default function OptionsPage() {
   const defaultAccountId = String(accountsResp?.default_account_id || "").trim();
   const effectiveAccountId = selectedAccountId || defaultAccountId;
   const accountQuery = effectiveAccountId ? `account_id=${encodeURIComponent(effectiveAccountId)}` : "";
+  const canLoadBrokerData = canTradeOptions && Boolean(effectiveAccountId);
 
   useEffect(() => {
     if (selectedAccountId) return;
@@ -136,12 +140,12 @@ export default function OptionsPage() {
   }, [defaultAccountId, selectedAccountId]);
 
   const { data: ordersResp, mutate: mutateOrders } = useSWR(
-    canTradeOptions ? `/options/orders${accountQuery ? `?${accountQuery}` : ""}` : null,
+    canLoadBrokerData ? `/options/orders?${accountQuery}` : null,
     (path: string) => apiGet<any>(path),
     buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
   );
   const { data: positionsResp, mutate: mutatePositions } = useSWR(
-    canTradeOptions ? `/options/positions${accountQuery ? `?${accountQuery}` : ""}` : null,
+    canLoadBrokerData ? `/options/positions?${accountQuery}` : null,
     (path: string) => apiGet<any>(path),
     buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
   );
@@ -162,36 +166,38 @@ export default function OptionsPage() {
     pnlRefreshNonce ? `&_t=${pnlRefreshNonce}` : ""
   }`;
   const { data: pnlResp, mutate: mutatePnl, isValidating: pnlLoading } = useSWR(
-    canTradeOptions ? pnlApiPath : null,
-    (path: string) => apiGet<any>(path),
-    buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
+    canLoadBrokerData ? pnlApiPath : null,
+    (path: string) => apiGet<any>(path, { timeoutMs: 45000, retries: 0, cacheTtlMs: 0 }),
+    PNL_CALENDAR_SWROPTS
   );
   const currentYearPnlApiPath = `/options/pnl-calendar?from_date=${currentYearFromDate}&to_date=${currentYearToDate}&tz=${encodeURIComponent(
     "America/New_York"
   )}${pnlSymbolQuery ? `&symbol=${encodeURIComponent(pnlSymbolQuery)}` : ""}${
     accountQuery ? `&${accountQuery}` : ""
-  }${
+  }&summary_only=1${
     pnlRefreshNonce ? `&_t=${pnlRefreshNonce}` : ""
   }`;
+  const currentYearSummaryMatchesMainRange = currentYearFromDate === fromDate && currentYearToDate === toDate;
   const { data: currentYearPnlResp } = useSWR(
-    canTradeOptions && currentYearPnlApiPath !== pnlApiPath ? currentYearPnlApiPath : null,
-    (path: string) => apiGet<any>(path),
-    buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
+    canLoadBrokerData && !currentYearSummaryMatchesMainRange ? currentYearPnlApiPath : null,
+    (path: string) => apiGet<any>(path, { timeoutMs: 45000, retries: 0, cacheTtlMs: 0 }),
+    PNL_CALENDAR_SWROPTS
   );
-  const effectiveCurrentYearPnlResp = currentYearPnlApiPath === pnlApiPath ? pnlResp : currentYearPnlResp;
+  const effectiveCurrentYearPnlResp = currentYearSummaryMatchesMainRange ? pnlResp : currentYearPnlResp;
   const currentMonthPnlApiPath = `/options/pnl-calendar?from_date=${currentMonthFromDate}&to_date=${currentMonthToDate}&tz=${encodeURIComponent(
     "America/New_York"
   )}${pnlSymbolQuery ? `&symbol=${encodeURIComponent(pnlSymbolQuery)}` : ""}${
     accountQuery ? `&${accountQuery}` : ""
-  }${
+  }&summary_only=1${
     pnlRefreshNonce ? `&_t=${pnlRefreshNonce}` : ""
   }`;
+  const currentMonthSummaryMatchesMainRange = currentMonthFromDate === fromDate && currentMonthToDate === toDate;
   const { data: currentMonthPnlResp } = useSWR(
-    canTradeOptions && currentMonthPnlApiPath !== pnlApiPath ? currentMonthPnlApiPath : null,
-    (path: string) => apiGet<any>(path),
-    buildSwrOptions(SWR_INTERVALS.normalPoll.refreshInterval, SWR_INTERVALS.normalPoll.dedupingInterval)
+    canLoadBrokerData && !currentMonthSummaryMatchesMainRange ? currentMonthPnlApiPath : null,
+    (path: string) => apiGet<any>(path, { timeoutMs: 45000, retries: 0, cacheTtlMs: 0 }),
+    PNL_CALENDAR_SWROPTS
   );
-  const effectiveCurrentMonthPnlResp = currentMonthPnlApiPath === pnlApiPath ? pnlResp : currentMonthPnlResp;
+  const effectiveCurrentMonthPnlResp = currentMonthSummaryMatchesMainRange ? pnlResp : currentMonthPnlResp;
   const orders: any[] = ordersResp?.orders || [];
   const positions: any[] = positionsResp?.positions || [];
   const pnlDays: OptionPnlDay[] = pnlResp?.days || [];

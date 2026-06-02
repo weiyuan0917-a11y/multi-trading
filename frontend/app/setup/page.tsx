@@ -411,6 +411,7 @@ export default function SetupPage() {
   const [risk, setRisk] = useState<RiskCfg | null>(null);
   const [services, setServices] = useState<any>(null);
   const [diag, setDiag] = useState<LongPortDiag | null>(null);
+  const [showBrokerDiagnostics, setShowBrokerDiagnostics] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testingOpenbb, setTestingOpenbb] = useState(false);
   const [restartingOpenbb, setRestartingOpenbb] = useState(false);
@@ -441,6 +442,7 @@ export default function SetupPage() {
   const [feeEstimate, setFeeEstimate] = useState<any>(null);
   const [accountsResp, setAccountsResp] = useState<SetupAccountsResponse | null>(null);
   const [accountsLoading, setAccountsLoading] = useState(false);
+  const [showAccountRegistrationForm, setShowAccountRegistrationForm] = useState(false);
   const [registeringAccount, setRegisteringAccount] = useState(false);
   const [accountActionLoading, setAccountActionLoading] = useState<Record<string, "connect" | "disconnect" | "delete" | undefined>>({});
   const [generatingFosunKeyPair, setGeneratingFosunKeyPair] = useState(false);
@@ -1307,6 +1309,7 @@ export default function SetupPage() {
       }));
       const latest = await apiGet<SetupAccountsResponse>("/setup/accounts");
       setAccountsResp(latest);
+      setShowAccountRegistrationForm(false);
       await refreshFeeBrokersMeta().catch(() => {});
     } catch (e: any) {
       setErr(String(e.message || e));
@@ -1687,69 +1690,12 @@ export default function SetupPage() {
       {activeSection === "accounts" ? (
         <>
       <div className="panel space-y-3">
-        <div className="field-label">Broker API 连接诊断（可视化）</div>
-        <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-slate-300">估算总连接占用（API + MCP + Feishu）</span>
-            <span className={(diag?.estimated_connections_total || 0) >= 8 ? "text-rose-300" : (diag?.estimated_connections_total || 0) >= 5 ? "text-amber-300" : "text-emerald-300"}>
-              {diag?.estimated_connections_total ?? 0}/{diag?.connection_limit ?? 10}
-            </span>
-          </div>
-          <div className="mt-2 h-2 w-full rounded bg-slate-800">
-            <div
-              className={`h-2 rounded ${((diag?.estimated_usage_pct_total || 0) >= 80 ? "bg-rose-500" : (diag?.estimated_usage_pct_total || 0) >= 50 ? "bg-amber-500" : "bg-emerald-500")}`}
-              style={{ width: `${Math.max(0, Math.min(100, diag?.estimated_usage_pct_total || 0))}%` }}
-            />
-          </div>
-          <div className="mt-2 text-xs text-slate-400">
-            API: {diag?.estimated_breakdown?.api_active ?? 0} | MCP: {diag?.estimated_breakdown?.mcp_estimated ?? 0} | Feishu: {diag?.estimated_breakdown?.feishu_estimated ?? 0}
-          </div>
-          {(diag?.alert_level && diag.alert_level !== "ok") ? (
-            <div className={`mt-2 rounded border px-2 py-1 text-xs ${
-              diag.alert_level === "critical"
-                ? "border-rose-500/50 bg-rose-950/30 text-rose-300"
-                : diag.alert_level === "warning"
-                  ? "border-amber-500/50 bg-amber-950/20 text-amber-300"
-                  : "border-cyan-500/40 bg-cyan-950/20 text-cyan-300"
-            }`}>
-              连接占用告警：{diag.alert_level === "critical" ? "严重" : diag.alert_level === "warning" ? "偏高" : "注意"}
-            </div>
-          ) : null}
-          <div className="mt-3 border-t border-slate-800 pt-3" />
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-slate-300">当前 API 进程连接占用</span>
-            <span className={diag?.active_connections_api_process ? "text-amber-300" : "text-emerald-300"}>
-              {diag?.active_connections_api_process ?? 0}/{diag?.connection_limit ?? 10}
-            </span>
-          </div>
-          <div className="mt-2 h-2 w-full rounded bg-slate-800">
-            <div
-              className={`h-2 rounded ${((diag?.usage_pct_api_process || 0) >= 80 ? "bg-rose-500" : (diag?.usage_pct_api_process || 0) >= 50 ? "bg-amber-500" : "bg-emerald-500")}`}
-              style={{ width: `${Math.max(0, Math.min(100, diag?.usage_pct_api_process || 0))}%` }}
-            />
-          </div>
-          <div className="mt-2 text-xs text-slate-400">
-            QuoteCtx: {diag?.quote_ctx_ready ? "已建立" : "未建立"} | TradeCtx: {diag?.trade_ctx_ready ? "已建立" : "未建立"}
-          </div>
-          <div className="mt-1 text-xs text-slate-500">
-            进程状态：API {diag?.processes?.api?.running ? "运行" : "未运行"} / MCP {diag?.processes?.mcp?.running ? "运行" : "未运行"} / Feishu {diag?.processes?.feishu_bot?.running ? "运行" : "未运行"}
-          </div>
-          {(diag?.recommendations || []).length ? (
-            <div className="mt-2 rounded border border-slate-700/70 bg-slate-950/50 p-2 text-xs text-slate-300">
-              <div className="mb-1 text-slate-200">建议操作</div>
-              {(diag?.recommendations || []).map((x, i) => (
-                <div key={`${i}-${x}`}>- {x}</div>
-              ))}
-            </div>
-          ) : null}
-          {diag?.last_error ? <div className="mt-1 text-xs text-rose-300">最近错误：{diag.last_error}</div> : null}
-          <div className="mt-1 text-xs text-slate-500">{diag?.note || "暂无诊断信息"}</div>
-          <button className="btn-secondary mt-3" onClick={probeLongPort}>立即探测连接</button>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="field-label">账户管理（本地持久化）</div>
+          <button type="button" className="btn-primary px-3 py-2 text-xs" onClick={() => setShowAccountRegistrationForm(true)}>
+            添加账户
+          </button>
         </div>
-      </div>
-
-      <div className="panel space-y-3">
-        <div className="field-label">账户管理（本地持久化）</div>
         <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
             <span>
@@ -1824,6 +1770,8 @@ export default function SetupPage() {
           </div>
         </div>
 
+        {showAccountRegistrationForm ? (
+          <>
         {accountRegistrationNeedsPremium ? (
           <EntitlementNotice
             feature="multi_broker"
@@ -2234,9 +2182,90 @@ export default function SetupPage() {
             </div>
           ) : null}
         </div>
-        <button type="button" className="btn-primary" onClick={() => void registerAccount()} disabled={registeringAccount || accountRegistrationNeedsPremium}>
-          {registeringAccount ? "注册中..." : "注册账户"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className="btn-primary" onClick={() => void registerAccount()} disabled={registeringAccount || accountRegistrationNeedsPremium}>
+            {registeringAccount ? "注册中..." : "注册账户"}
+          </button>
+          <button type="button" className="btn-secondary" onClick={() => setShowAccountRegistrationForm(false)} disabled={registeringAccount}>
+            取消
+          </button>
+        </div>
+          </>
+        ) : null}
+      </div>
+
+      <div className="panel space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="field-label">Broker API 连接诊断（可视化）</div>
+            <p className="mt-1 text-xs text-slate-500">
+              连接占用与上下文状态诊断，默认折叠。
+            </p>
+          </div>
+          <button type="button" className="btn-secondary px-3 py-2 text-xs" onClick={() => setShowBrokerDiagnostics((v) => !v)}>
+            {showBrokerDiagnostics ? "收起" : "展开"}
+          </button>
+        </div>
+        {showBrokerDiagnostics ? (
+          <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-300">估算总连接占用（API + MCP + Feishu）</span>
+              <span className={(diag?.estimated_connections_total || 0) >= 8 ? "text-rose-300" : (diag?.estimated_connections_total || 0) >= 5 ? "text-amber-300" : "text-emerald-300"}>
+                {diag?.estimated_connections_total ?? 0}/{diag?.connection_limit ?? 10}
+              </span>
+            </div>
+            <div className="mt-2 h-2 w-full rounded bg-slate-800">
+              <div
+                className={`h-2 rounded ${((diag?.estimated_usage_pct_total || 0) >= 80 ? "bg-rose-500" : (diag?.estimated_usage_pct_total || 0) >= 50 ? "bg-amber-500" : "bg-emerald-500")}`}
+                style={{ width: `${Math.max(0, Math.min(100, diag?.estimated_usage_pct_total || 0))}%` }}
+              />
+            </div>
+            <div className="mt-2 text-xs text-slate-400">
+              API: {diag?.estimated_breakdown?.api_active ?? 0} | MCP: {diag?.estimated_breakdown?.mcp_estimated ?? 0} | Feishu: {diag?.estimated_breakdown?.feishu_estimated ?? 0}
+            </div>
+            {(diag?.alert_level && diag.alert_level !== "ok") ? (
+              <div className={`mt-2 rounded border px-2 py-1 text-xs ${
+                diag.alert_level === "critical"
+                  ? "border-rose-500/50 bg-rose-950/30 text-rose-300"
+                  : diag.alert_level === "warning"
+                    ? "border-amber-500/50 bg-amber-950/20 text-amber-300"
+                    : "border-cyan-500/40 bg-cyan-950/20 text-cyan-300"
+              }`}>
+                连接占用告警：{diag.alert_level === "critical" ? "严重" : diag.alert_level === "warning" ? "偏高" : "注意"}
+              </div>
+            ) : null}
+            <div className="mt-3 border-t border-slate-800 pt-3" />
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-300">当前 API 进程连接占用</span>
+              <span className={diag?.active_connections_api_process ? "text-amber-300" : "text-emerald-300"}>
+                {diag?.active_connections_api_process ?? 0}/{diag?.connection_limit ?? 10}
+              </span>
+            </div>
+            <div className="mt-2 h-2 w-full rounded bg-slate-800">
+              <div
+                className={`h-2 rounded ${((diag?.usage_pct_api_process || 0) >= 80 ? "bg-rose-500" : (diag?.usage_pct_api_process || 0) >= 50 ? "bg-amber-500" : "bg-emerald-500")}`}
+                style={{ width: `${Math.max(0, Math.min(100, diag?.usage_pct_api_process || 0))}%` }}
+              />
+            </div>
+            <div className="mt-2 text-xs text-slate-400">
+              QuoteCtx: {diag?.quote_ctx_ready ? "已建立" : "未建立"} | TradeCtx: {diag?.trade_ctx_ready ? "已建立" : "未建立"}
+            </div>
+            <div className="mt-1 text-xs text-slate-500">
+              进程状态：API {diag?.processes?.api?.running ? "运行" : "未运行"} / MCP {diag?.processes?.mcp?.running ? "运行" : "未运行"} / Feishu {diag?.processes?.feishu_bot?.running ? "运行" : "未运行"}
+            </div>
+            {(diag?.recommendations || []).length ? (
+              <div className="mt-2 rounded border border-slate-700/70 bg-slate-950/50 p-2 text-xs text-slate-300">
+                <div className="mb-1 text-slate-200">建议操作</div>
+                {(diag?.recommendations || []).map((x, i) => (
+                  <div key={`${i}-${x}`}>- {x}</div>
+                ))}
+              </div>
+            ) : null}
+            {diag?.last_error ? <div className="mt-1 text-xs text-rose-300">最近错误：{diag.last_error}</div> : null}
+            <div className="mt-1 text-xs text-slate-500">{diag?.note || "暂无诊断信息"}</div>
+            <button className="btn-secondary mt-3" onClick={probeLongPort}>立即探测连接</button>
+          </div>
+        ) : null}
       </div>
 
         </>

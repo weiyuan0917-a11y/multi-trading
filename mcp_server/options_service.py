@@ -578,8 +578,46 @@ def _to_int(v: Any, default: int = 0) -> int:
         return default
 
 
+def _to_epoch_seconds(v: Any, default: int = 0) -> int:
+    if v is None or v == "":
+        return default
+    try:
+        if isinstance(v, datetime):
+            dt = v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        if isinstance(v, date):
+            return int(datetime.combine(v, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    except Exception:
+        return default
+    try:
+        n = float(v)
+        if abs(n) > 1_000_000_000_000_000:
+            n = n / 1_000_000_000
+        elif abs(n) > 1_000_000_000_000:
+            n = n / 1_000
+        return int(n)
+    except Exception:
+        pass
+    s = str(v or "").strip()
+    if not s:
+        return default
+    try:
+        raw = s[:-1] + "+00:00" if s.endswith("Z") else s
+        dt = datetime.fromisoformat(raw.replace(" ", "T"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        pass
+    try:
+        dt = datetime.combine(date.fromisoformat(s[:10]), datetime.min.time(), tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return default
+
+
 def _to_date_key(ts: Any, tz_name: str) -> str:
-    sec = _to_int(ts, 0)
+    sec = _to_epoch_seconds(ts, 0)
     if sec <= 0:
         return ""
     try:
@@ -601,13 +639,59 @@ def _extract_charge_total_amount(detail_obj: Any) -> float:
     return max(0.0, _to_float(getattr(cd, "total_amount", 0.0), 0.0))
 
 
-def _iter_option_orders_for_range(trade_ctx: Any) -> list[Any]:
+def _row_value(row: Any, *names: str) -> Any:
+    for name in names:
+        val = getattr(row, name, None)
+        if val not in (None, ""):
+            return val
+    if isinstance(row, dict):
+        for name in names:
+            val = row.get(name)
+            if val not in (None, ""):
+                return val
+    raw = getattr(row, "raw", None)
+    if isinstance(raw, dict):
+        for name in names:
+            val = raw.get(name)
+            if val not in (None, ""):
+                return val
+    return None
+
+
+def _order_in_date_range(row: Any, *, from_date: date, to_date: date, tz_name: str) -> bool:
+    raw_ts = _row_value(
+        row,
+        "executed_at",
+        "filled_at",
+        "updated_at",
+        "submitted_at",
+        "created_at",
+        "time",
+        "timestamp",
+    )
+    if raw_ts in (None, ""):
+        return True
+    day_key = _to_date_key(raw_ts, tz_name)
+    if not day_key:
+        return True
+    return from_date.isoformat() <= day_key <= to_date.isoformat()
+
+
+def _iter_option_orders_for_range(
+    trade_ctx: Any,
+    *,
+    from_date: date,
+    to_date: date,
+    tz_name: str,
+) -> list[Any]:
     """
     尽可能获取可用期权订单集合：
     1) today_orders（稳定）
     2) history_orders（若 SDK 版本支持）
     """
     out: list[Any] = []
+    if trade_ctx is None:
+        return out
     seen: set[str] = set()
 
     def _add(rows: Any) -> None:
@@ -617,6 +701,8 @@ def _iter_option_orders_for_range(trade_ctx: Any) -> list[Any]:
             oid = str(getattr(o, "order_id", "") or "")
             sym = str(getattr(o, "symbol", "") or "")
             if not oid or oid in seen or not _is_option_symbol(sym):
+                continue
+            if not _order_in_date_range(o, from_date=from_date, to_date=to_date, tz_name=tz_name):
                 continue
             seen.add(oid)
             out.append(o)
@@ -628,9 +714,17 @@ def _iter_option_orders_for_range(trade_ctx: Any) -> list[Any]:
 
     fn = getattr(trade_ctx, "history_orders", None)
     if callable(fn):
+        start_dt = datetime.combine(from_date, datetime.min.time())
+        end_dt = datetime.combine(to_date + timedelta(days=1), datetime.min.time()) - timedelta(seconds=1)
+        start_ts = int(start_dt.replace(tzinfo=timezone.utc).timestamp())
+        end_ts = int(end_dt.replace(tzinfo=timezone.utc).timestamp())
         for call in (
-            lambda: fn(),
+            lambda: fn(status="Filled", start_at=start_dt, end_at=end_dt),
+            lambda: fn(start_at=start_dt, end_at=end_dt),
+            lambda: fn(status="Filled", start_at=start_ts, end_at=end_ts),
+            lambda: fn(start_at=start_ts, end_at=end_ts),
             lambda: fn(status="Filled"),
+            lambda: fn(),
         ):
             try:
                 _add(call())
@@ -650,20 +744,22 @@ def _iter_option_executions_for_range(
     直接读取成交明细（history/today），用于订单接口不可用时的兜底。
     """
     out: list[dict[str, Any]] = []
+    if trade_ctx is None:
+        return out
     hist_fn = getattr(trade_ctx, "history_executions", None)
     today_fn = getattr(trade_ctx, "today_executions", None)
 
     def _norm_row(x: Any) -> dict[str, Any] | None:
-        oid = str(getattr(x, "order_id", "") or (x.get("order_id") if isinstance(x, dict) else "") or "").strip()
-        sym = str(getattr(x, "symbol", "") or (x.get("symbol") if isinstance(x, dict) else "")).strip().upper()
+        oid = str(_row_value(x, "order_id") or "").strip()
+        sym = str(_row_value(x, "symbol") or "").strip().upper()
         if not _is_option_symbol(sym):
             return None
-        side = _normalize_side(getattr(x, "side", "") or (x.get("side") if isinstance(x, dict) else ""))
-        qty = max(0, _to_int(getattr(x, "quantity", None), _to_int((x or {}).get("quantity"), 0)))
-        price = max(0.0, _to_float(getattr(x, "price", None), _to_float((x or {}).get("price"), 0.0)))
-        ts = _to_int(getattr(x, "time", None), _to_int((x or {}).get("time"), 0))
+        side = _normalize_side(_row_value(x, "side"))
+        qty = max(0, _to_int(_row_value(x, "quantity", "qty", "executed_quantity"), 0))
+        price = max(0.0, _to_float(_row_value(x, "price", "executed_price"), 0.0))
+        ts = _to_epoch_seconds(_row_value(x, "time", "created_at", "updated_at", "executed_at", "timestamp"), 0)
         if ts <= 0:
-            ts = _to_int(getattr(x, "created_at", None), _to_int((x or {}).get("created_at"), 0))
+            ts = _to_epoch_seconds(_row_value(x, "created_at"), 0)
         if not sym or side not in {"buy", "sell"} or qty <= 0 or price <= 0 or ts <= 0:
             return None
         out = {"symbol": sym, "side": side, "qty": qty, "price": price, "ts": ts}
@@ -938,6 +1034,7 @@ def get_option_pnl_calendar(
     to_date: str,
     tz_name: str = "America/New_York",
     symbol_query: str | None = None,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     """
     按日汇总期权已实现收益（FIFO）。
@@ -968,7 +1065,7 @@ def get_option_pnl_calendar(
             str(row.get("side", "")),
             int(row.get("qty", 0)),
             int(round(float(row.get("price", 0.0)) * 10000)),
-            int(row.get("ts", 0)),
+            _to_epoch_seconds(row.get("ts"), 0),
         )
 
     def _remember_exec(row: dict[str, Any]) -> None:
@@ -998,7 +1095,7 @@ def get_option_pnl_calendar(
                     "qty": _qty,
                     "price": float(r["price"]),
                     "fee_per_contract": _estimate_fee_per_contract(_side, _qty),
-                    "ts": int(r["ts"]),
+                    "ts": _to_epoch_seconds(r.get("ts"), 0),
                     "order_id": str(r.get("order_id") or "").strip(),
                 }
             )
@@ -1027,7 +1124,7 @@ def get_option_pnl_calendar(
                 str(r["side"]),
                 int(r["qty"]),
                 int(round(float(r["price"]) * 10000)),
-                int(r["ts"]),
+                _to_epoch_seconds(r.get("ts"), 0),
             )
             if key in seen_exec_keys:
                 continue
@@ -1040,7 +1137,7 @@ def get_option_pnl_calendar(
                     "qty": int(r["qty"]),
                     "price": float(r["price"]),
                     "fee_per_contract": _estimate_fee_per_contract(str(r["side"]), int(r["qty"])),
-                    "ts": int(r["ts"]),
+                    "ts": _to_epoch_seconds(r.get("ts"), 0),
                     "order_id": oid,
                 }
             )
@@ -1057,7 +1154,7 @@ def get_option_pnl_calendar(
     fallback_executions = 0
     detail_exec_count = 0
     try:
-        all_orders = _iter_option_orders_for_range(trade_ctx)
+        all_orders = _iter_option_orders_for_range(trade_ctx, from_date=d0, to_date=d1, tz_name=tz_name)
         orders_scanned = len(all_orders)
         pre_detail_order_ids = set(seen_order_ids)
 
@@ -1130,7 +1227,7 @@ def get_option_pnl_calendar(
                             qty=q,
                             price=p,
                             fee_per_contract=fee_pc,
-                            ts=_to_int(t, 0),
+                            ts=_to_epoch_seconds(t, 0),
                             order_id=oid,
                         )
                         if added:
@@ -1141,7 +1238,9 @@ def get_option_pnl_calendar(
                         continue
                 if matched == 0:
                     p2 = _to_float(getattr(detail, "executed_price", 0), 0.0)
-                    t2 = _to_int(getattr(detail, "updated_at", 0), 0) or _to_int(getattr(detail, "submitted_at", 0), 0)
+                    t2 = _to_epoch_seconds(getattr(detail, "updated_at", 0), 0) or _to_epoch_seconds(
+                        getattr(detail, "submitted_at", 0), 0
+                    )
                     dk2 = _to_date_key(t2, tz_name)
                     added = _append_order_detail_exec(
                         day_key=dk2,
@@ -1265,8 +1364,8 @@ def get_option_pnl_calendar(
         "to_date": d1.isoformat(),
         "tz": tz_name,
         "symbol_query": sym_q or None,
-        "days": rows,
-        "details_by_date": {k: v for k, v in daily_details.items()},
+        "days": [] if summary_only else rows,
+        "details_by_date": {} if summary_only else {k: v for k, v in daily_details.items()},
         "debug": {
             "orders_scanned": int(orders_scanned),
             "order_details_loaded": int(details_loaded),
@@ -1276,6 +1375,7 @@ def get_option_pnl_calendar(
             "order_detail_executions_added": int(detail_exec_count),
             "execution_source": execution_source,
             "log_executions": int(log_exec_count),
+            "summary_only": bool(summary_only),
         },
         "summary": {
             "total_realized_pnl": round(total_pnl, 4),

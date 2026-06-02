@@ -2,131 +2,175 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_SVG = ROOT / "frontend" / "public" / "brand" / "multitrading-logo.svg"
 OUT_DIR = ROOT / "assets" / "windows"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+SOURCE_PNG = OUT_DIR / "multitrading-logo-source.png"
+ICON_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+CANVAS_SIZE = 1024
+SOURCE_BBOX_PADDING = 0
+LEGACY_PADDING = 28
 
 
-def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for name in ("segoeuib.ttf", "seguisb.ttf", "arialbd.ttf"):
-        path = Path("C:/Windows/Fonts") / name
-        if path.exists():
-            return ImageFont.truetype(str(path), size=size)
-    return ImageFont.load_default()
+def resolve_source() -> Path:
+    if SOURCE_PNG.exists():
+        return SOURCE_PNG
+    raise FileNotFoundError(f"missing icon source: {SOURCE_PNG}")
 
 
-def _rounded_mask(size: tuple[int, int], radius: int) -> Image.Image:
-    mask = Image.new("L", size, 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=radius, fill=255)
-    return mask
+def load_source_mark(source: Path) -> Image.Image:
+    with Image.open(source) as image:
+        image = ImageOps.exif_transpose(image).convert("RGBA")
+
+    bbox = image.getbbox()
+    if not bbox:
+        raise ValueError(f"icon source is empty: {source}")
+    left, top, right, bottom = bbox
+    left = max(0, left - SOURCE_BBOX_PADDING)
+    top = max(0, top - SOURCE_BBOX_PADDING)
+    right = min(image.width, right + SOURCE_BBOX_PADDING)
+    bottom = min(image.height, bottom + SOURCE_BBOX_PADDING)
+    return image.crop((left, top, right, bottom))
 
 
-def _gradient(size: tuple[int, int], colors: tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]) -> Image.Image:
-    img = Image.new("RGBA", size, (0, 0, 0, 0))
-    pixels = img.load()
-    w, h = size
-    for y in range(h):
-        for x in range(w):
-            tx = x / max(1, w - 1)
-            ty = y / max(1, h - 1)
-            w1 = max(0.0, 1.0 - (tx * 0.75 + ty * 0.7))
-            w2 = max(0.0, 1.0 - abs((tx + ty) / 2.0 - 0.52) * 1.35)
-            w3 = max(0.0, tx * 0.65 + ty * 0.9)
-            total = max(0.001, w1 + w2 + w3)
-            r = int((colors[0][0] * w1 + colors[1][0] * w2 + colors[2][0] * w3) / total)
-            g = int((colors[0][1] * w1 + colors[1][1] * w2 + colors[2][1] * w3) / total)
-            b = int((colors[0][2] * w1 + colors[1][2] * w2 + colors[2][2] * w3) / total)
-            pixels[x, y] = (r, g, b, 255)
-    return img
+def fit_on_square(image: Image.Image, target_size: int) -> Image.Image:
+    ratio = target_size / max(image.width, image.height)
+    fitted_size = (max(1, round(image.width * ratio)), max(1, round(image.height * ratio)))
+    fitted = image.resize(fitted_size, Image.Resampling.LANCZOS)
+    square = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0))
+    x = (CANVAS_SIZE - fitted.width) // 2
+    y = (CANVAS_SIZE - fitted.height) // 2
+    square.alpha_composite(fitted, (x, y))
+    return square
 
 
-def _draw_mark(draw: ImageDraw.ImageDraw, layer: Image.Image, s: float, ox: int, oy: int) -> None:
-    def p(x: float, y: float) -> tuple[int, int]:
-        return int(ox + x * s), int(oy + y * s)
-
-    bg = _gradient((int(56 * s), int(56 * s)), ((18, 36, 63), (11, 23, 42), (10, 44, 50)))
-    mask = _rounded_mask(bg.size, int(15 * s))
-    shadow = Image.new("RGBA", bg.size, (0, 0, 0, 0))
-    shadow.putalpha(mask.filter(ImageFilter.GaussianBlur(max(1, int(1.4 * s)))))
-    layer.alpha_composite(shadow, p(4, 5))
-    layer.alpha_composite(Image.composite(bg, Image.new("RGBA", bg.size, (0, 0, 0, 0)), mask), p(4, 4))
-
-    ring_width = max(2, int(2 * s))
-    draw.rounded_rectangle((*p(5, 5), *p(59, 59)), radius=int(14 * s), outline=(102, 231, 255, 255), width=ring_width)
-    draw.rounded_rectangle((*p(6.5, 6.5), *p(57.5, 57.5)), radius=int(13 * s), outline=(91, 108, 255, 190), width=max(1, ring_width // 2))
-    draw.rounded_rectangle((*p(8, 8), *p(56, 56)), radius=int(12 * s), outline=(32, 242, 169, 150), width=max(1, ring_width // 2))
-
-    grid = (148, 163, 184, 108)
-    gw = max(1, int(2 * s))
-    for x, ytop in [(18, 22), (28, 17), (38, 27), (48, 15)]:
-        draw.line((*p(x, ytop), *p(x, 46)), fill=grid, width=gw)
-    draw.line((*p(15, 46), *p(51, 46)), fill=grid, width=gw)
-
-    tick = (216, 252, 255, 235)
-    tw = max(1, int(2.4 * s))
-    for x1, y in [(15, 30), (25, 25), (35, 34), (45, 23)]:
-        draw.line((*p(x1, y), *p(x1 + 6, y)), fill=tick, width=tw)
-
-    points = [p(15, 39), p(24.5, 31), p(32.5, 35), p(47, 22)]
-    glow = Image.new("RGBA", layer.size, (0, 0, 0, 0))
-    gdraw = ImageDraw.Draw(glow)
-    gdraw.line(points, fill=(63, 219, 255, 130), width=max(4, int(6.6 * s)), joint="curve")
-    layer.alpha_composite(glow.filter(ImageFilter.GaussianBlur(max(1, int(1.2 * s)))))
-    draw.line(points, fill=(125, 211, 252, 255), width=max(2, int(4.2 * s)), joint="curve")
-    draw.line(points[1:], fill=(91, 108, 255, 255), width=max(2, int(3.7 * s)), joint="curve")
-    draw.line(points[2:], fill=(52, 211, 153, 255), width=max(2, int(3.2 * s)), joint="curve")
-    draw.line([p(47, 22), p(48.4, 29.3), p(41.2, 26.9)], fill=(138, 251, 226, 255), width=max(2, int(3.2 * s)), joint="curve")
-    for x, y in [(24.5, 31), (32.5, 35)]:
-        cx, cy = p(x, y)
-        r = max(2, int(2.3 * s))
-        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(216, 252, 255, 255))
+def make_launcher_icon(source: Path) -> Image.Image:
+    mark = load_source_mark(source)
+    return fit_on_square(mark, 960)
 
 
-def _draw_full_logo(width: int = 1856, height: int = 512) -> Image.Image:
-    # This mirrors frontend/public/brand/multitrading-logo.svg for Windows icon use.
-    s = height / 64
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    _draw_mark(draw, img, s, 0, 0)
+def color(hex_value: str, alpha: int = 255) -> tuple[int, int, int, int]:
+    value = hex_value.lstrip("#")
+    return tuple(int(value[index : index + 2], 16) for index in (0, 2, 4)) + (alpha,)
 
-    font = _font(int(24 * s))
-    text = "MultiTrading"
-    text_x = int(74 * s)
-    text_y = int(15 * s)
-    mask = Image.new("L", img.size, 0)
-    mdraw = ImageDraw.Draw(mask)
-    mdraw.text((text_x, text_y), text, font=font, fill=255)
-    text_gradient = _gradient(img.size, ((248, 250, 252), (216, 252, 255), (138, 251, 226)))
-    img.alpha_composite(Image.composite(text_gradient, Image.new("RGBA", img.size, (0, 0, 0, 0)), mask))
 
-    underline_y = int(47 * s)
-    draw.line((int(75 * s), underline_y, int(206 * s), underline_y), fill=(102, 231, 255, 150), width=max(2, int(2 * s)))
-    return img
+def draw_download_badge(canvas: Image.Image, box: tuple[int, int, int, int]) -> None:
+    x0, y0, x1, y1 = box
+    width = x1 - x0
+    height = y1 - y0
+    badge = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(badge)
+
+    pad = max(8, int(width * 0.045))
+    radius = int(width * 0.22)
+
+    shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.rounded_rectangle((pad, pad, width - pad, height - pad), radius=radius, fill=(0, 0, 0, 120))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(max(1, int(width * 0.025))))
+    badge.alpha_composite(shadow)
+
+    draw.rounded_rectangle(
+        (pad, pad, width - pad, height - pad),
+        radius=radius,
+        fill=color("#082334", 232),
+        outline=color("#35e0c8"),
+        width=max(3, int(width * 0.035)),
+    )
+    draw.rounded_rectangle(
+        (pad * 2, pad * 2, width - pad * 2, height - pad * 2),
+        radius=max(1, radius - pad),
+        outline=color("#7ef6e7", 115),
+        width=max(1, int(width * 0.012)),
+    )
+
+    center_x = width // 2
+    top = int(height * 0.18)
+    shaft_bottom = int(height * 0.58)
+    shaft_width = int(width * 0.14)
+    head_y = int(height * 0.51)
+    head_width = int(width * 0.56)
+    head_bottom = int(height * 0.80)
+    line_y = int(height * 0.86)
+
+    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    glow_draw.rounded_rectangle(
+        (center_x - shaft_width // 2, top, center_x + shaft_width // 2, shaft_bottom),
+        radius=max(1, shaft_width // 2),
+        fill=(82, 232, 194, 130),
+    )
+    glow_draw.polygon(
+        [(center_x - head_width // 2, head_y), (center_x + head_width // 2, head_y), (center_x, head_bottom)],
+        fill=(82, 232, 194, 130),
+    )
+    glow_draw.rounded_rectangle(
+        (int(width * 0.20), line_y - int(height * 0.027), int(width * 0.80), line_y + int(height * 0.027)),
+        radius=max(1, int(height * 0.027)),
+        fill=(82, 232, 194, 125),
+    )
+    glow = glow.filter(ImageFilter.GaussianBlur(max(1, int(width * 0.025))))
+    badge.alpha_composite(glow)
+
+    arrow_color = color("#8ff4d8")
+    line_color = color("#4be2bd")
+    draw.rounded_rectangle(
+        (center_x - shaft_width // 2, top, center_x + shaft_width // 2, shaft_bottom),
+        radius=max(1, shaft_width // 2),
+        fill=arrow_color,
+    )
+    draw.polygon(
+        [(center_x - head_width // 2, head_y), (center_x + head_width // 2, head_y), (center_x, head_bottom)],
+        fill=arrow_color,
+    )
+    draw.rounded_rectangle(
+        (int(width * 0.20), line_y - int(height * 0.027), int(width * 0.80), line_y + int(height * 0.027)),
+        radius=max(1, int(height * 0.027)),
+        fill=line_color,
+    )
+
+    canvas.alpha_composite(badge, (x0, y0))
+
+
+def make_installer_icon(source: Path) -> Image.Image:
+    mark = load_source_mark(source)
+    square = fit_on_square(mark, 880)
+    mark_box = square.getbbox()
+    if not mark_box:
+        return square
+
+    left, top, right, bottom = mark_box
+    mark_size = min(right - left, bottom - top)
+    badge_size = int(mark_size * 0.31)
+    inset_right = int(mark_size * 0.105)
+    inset_bottom = int(mark_size * 0.105)
+    x1 = right - inset_right - int(mark_size * 0.015)
+    y1 = bottom - inset_bottom - int(mark_size * 0.012)
+    draw_download_badge(square, (x1 - badge_size, y1 - badge_size, x1, y1))
+    return square
+
+
+def make_legacy_icon(source: Path) -> Image.Image:
+    mark = load_source_mark(source)
+    return fit_on_square(mark, CANVAS_SIZE - LEGACY_PADDING * 2)
+
+
+def save_icon(image: Image.Image, png_path: Path, ico_path: Path) -> None:
+    image.save(png_path)
+    image.save(ico_path, format="ICO", sizes=ICON_SIZES)
+    print(f"created {png_path}")
+    print(f"created {ico_path}")
 
 
 def main() -> None:
-    if not SOURCE_SVG.exists():
-        raise FileNotFoundError(SOURCE_SVG)
-    png = OUT_DIR / "multitrading-logo-icon.png"
-    ico = OUT_DIR / "multitrading-logo.ico"
-    wide = _draw_full_logo()
-    square = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
-    fitted = wide.resize((928, 256), Image.Resampling.LANCZOS)
-    square.alpha_composite(fitted, ((1024 - fitted.width) // 2, (1024 - fitted.height) // 2))
-    square.save(png)
-    square.save(
-        ico,
-        format="ICO",
-        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
-    )
-    print(f"source {SOURCE_SVG}")
-    print(f"created {png}")
-    print(f"created {ico}")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    source = resolve_source()
+    print(f"source {source}")
+    save_icon(make_launcher_icon(source), OUT_DIR / "multitrading-launcher-icon.png", OUT_DIR / "multitrading-launcher.ico")
+    save_icon(make_installer_icon(source), OUT_DIR / "multitrading-installer-icon.png", OUT_DIR / "multitrading-installer.ico")
+    save_icon(make_legacy_icon(source), OUT_DIR / "multitrading-logo-icon.png", OUT_DIR / "multitrading-logo.ico")
 
 
 if __name__ == "__main__":

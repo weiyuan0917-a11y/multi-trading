@@ -7,6 +7,7 @@ import atexit
 import threading
 import time
 import socket
+import hmac
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -3085,6 +3086,53 @@ async def health() -> dict[str, Any]:
     return {"ok": True, "service": "longport-ui-api"}
 
 
+def _launcher_shutdown_tokens() -> list[str]:
+    tokens: list[str] = []
+    env_token = str(os.getenv("MULTITRADING_LAUNCHER_SHUTDOWN_TOKEN") or "").strip()
+    if env_token:
+        tokens.append(env_token)
+    runtime_dir = str(os.getenv("MULTITRADING_RUNTIME_DIR") or "").strip()
+    if not runtime_dir:
+        base = str(os.getenv("LOCALAPPDATA") or "").strip()
+        if base:
+            runtime_dir = os.path.join(base, "MultiTrading")
+    if runtime_dir:
+        try:
+            token_path = os.path.join(runtime_dir, "launcher_shutdown.token")
+            with open(token_path, "r", encoding="utf-8") as f:
+                file_token = f.read().strip()
+            if file_token:
+                tokens.append(file_token)
+        except Exception:
+            pass
+    return tokens
+
+
+@app.post("/internal/launcher/shutdown")
+def internal_launcher_shutdown(
+    body: dict[str, Any] | None = Body(default=None),
+    x_mt_launcher_token: str | None = Header(default=None, alias="X-MT-Launcher-Token"),
+) -> dict[str, Any]:
+    submitted = str(x_mt_launcher_token or "").strip()
+    if not submitted or not any(hmac.compare_digest(submitted, token) for token in _launcher_shutdown_tokens()):
+        raise HTTPException(status_code=403, detail="launcher_shutdown_token_invalid")
+
+    from api import runtime_bridge as rt
+
+    payload = {
+        "stop_backend": bool((body or {}).get("stop_backend", True)),
+        "stop_frontend": bool((body or {}).get("stop_frontend", True)),
+        "stop_feishu_bot": bool((body or {}).get("stop_feishu_bot", True)),
+        "stop_auto_trader": bool((body or {}).get("stop_auto_trader", True)),
+        "stop_qqq_0dte_live": bool((body or {}).get("stop_qqq_0dte_live", True)),
+        "stop_qqq_1dte_live": bool((body or {}).get("stop_qqq_1dte_live", True)),
+        "stop_stock_options_swing": bool((body or {}).get("stop_stock_options_swing", True)),
+    }
+    result = rt.setup_stop_all_services(payload, owner_id=None)
+    result["launcher_shutdown"] = True
+    return result
+
+
 def _parse_client_bars_for_backtest(items: list[BacktestBarItem]) -> list[Bar]:
     out: list[Bar] = []
     for x in items:
@@ -3283,6 +3331,9 @@ def _calendar_cache_day_from_path(path: str) -> int:
 
 def _calendar_cache_same_end(a: date | None, b: date | None, slack_days: int = 5) -> bool:
     return a is not None and b is not None and abs((a - b).days) <= slack_days
+
+
+_CALENDAR_CACHE_REFERENCE_END_SLACK_DAYS = 2
 
 
 _USE_SERVER_CACHE_FOR_CALENDAR_FETCH = str(os.getenv("LONGPORT_USE_SERVER_KLINE_CACHE", "1")).strip().lower() in {
@@ -3522,17 +3573,28 @@ def _load_bars_from_server_kline_cache(
     for path, bars in loaded:
         cache_days = _calendar_cache_day_from_path(path)
         _first, last = _bars_date_bounds(bars)
-        if cache_days > 0 and cache_days < int(days) and _calendar_cache_same_end(last, ref_end, slack_days=0):
+        if (
+            cache_days > 0
+            and cache_days < int(days)
+            and _calendar_cache_same_end(last, ref_end, slack_days=_CALENDAR_CACHE_REFERENCE_END_SLACK_DAYS)
+        ):
             shorter_floor = max(shorter_floor, len(bars))
     exact_end = _bars_date_bounds(exact[1])[1] if exact else None
-    if exact and _calendar_cache_same_end(exact_end, ref_end, slack_days=0) and len(exact[1]) >= shorter_floor:
+    if (
+        exact
+        and _calendar_cache_same_end(exact_end, ref_end, slack_days=_CALENDAR_CACHE_REFERENCE_END_SLACK_DAYS)
+        and len(exact[1]) >= shorter_floor
+    ):
         return _trim_calendar_bars_to_days(exact[1], days, ref_end=ref_end)
 
     same_end_candidates: list[tuple[str, list[Bar]]] = []
     for path, bars in loaded:
         _first, last = _bars_date_bounds(bars)
         cache_days = _calendar_cache_day_from_path(path)
-        if _calendar_cache_same_end(last, ref_end, slack_days=0) and (cache_days == 0 or cache_days >= int(days)):
+        if (
+            _calendar_cache_same_end(last, ref_end, slack_days=_CALENDAR_CACHE_REFERENCE_END_SLACK_DAYS)
+            and (cache_days == 0 or cache_days >= int(days))
+        ):
             same_end_candidates.append((path, bars))
     if same_end_candidates:
         best_path, best_bars = max(same_end_candidates, key=lambda item: len(item[1]))
@@ -6522,12 +6584,34 @@ def internal_longport_quote(
             out = dict(gw)
             out.setdefault("source", "gateway")
             return out
-    owner_id = _optional_request_owner_id(authorization, x_local_owner, x_api_key)
-    qctx, _ = ensure_contexts(owner_id=owner_id)
     sym = str(symbol or "").strip().upper()
     if not sym:
         raise HTTPException(status_code=400, detail="symbol_required")
-    qs = broker_get_quotes(qctx, [sym])
+    owner_id = _optional_request_owner_id(authorization, x_local_owner, x_api_key)
+    try:
+        qctx, _ = ensure_contexts(owner_id=owner_id)
+    except Exception as e:
+        if _is_longport_connect_error(e):
+            return {
+                "symbol": sym,
+                "available": False,
+                "reason": "broker_connect_unavailable",
+                "detail": str(e),
+                "source": "broker_sdk",
+            }
+        raise
+    try:
+        qs = broker_get_quotes(qctx, [sym])
+    except Exception as e:
+        if _is_longport_connect_error(e):
+            return {
+                "symbol": sym,
+                "available": False,
+                "reason": "broker_quote_unavailable",
+                "detail": str(e),
+                "source": "broker_sdk",
+            }
+        raise
     if not qs:
         return {"symbol": sym, "available": False, "reason": "quote_empty", "source": "broker_sdk"}
     q = qs[0]

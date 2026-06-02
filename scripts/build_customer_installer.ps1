@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.0.24",
+  [string]$Version = "1.0.33",
   [string]$ReleaseRoot = "dist\customer",
   [switch]$SkipInno,
   [switch]$ReuseBackend,
@@ -316,7 +316,8 @@ $customerNextDir = Join-Path $frontendDir $customerNextDirName
 $standalone = Join-Path $customerNextDir "standalone"
 $static = Join-Path $customerNextDir "static"
 $public = Join-Path $frontendDir "public"
-$launcherIconPath = Join-Path $repo "assets\windows\multitrading-logo.ico"
+$launcherIconPath = Join-Path $repo "assets\windows\multitrading-launcher.ico"
+$installerIconPath = Join-Path $repo "assets\windows\multitrading-installer.ico"
 $licensePublicKeyPath = Resolve-LicensePublicKeyPath
 
 Write-Host "[1/9] Cleaning old customer build..."
@@ -342,6 +343,8 @@ if (-not $ReuseBackend) {
   $customerPythonDepsInstalled = $true
 }
 python (Join-Path $repo "scripts\make_windows_icon.py")
+Require-File $launcherIconPath "Launcher icon was not generated"
+Require-File $installerIconPath "Installer icon was not generated"
 
 Write-Host "[3/9] Building customer frontend (Next standalone)..."
 $standaloneServer = Join-Path $standalone "server.js"
@@ -357,9 +360,11 @@ if ($ReuseFrontend -and (Test-Path $standaloneServer) -and (Test-Path $static)) 
       $env:NEXT_TELEMETRY_DISABLED = "1"
       $env:NEXT_DIST_DIR = $customerNextDirName
       Remove-Item -LiteralPath $customerNextDir -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath (Join-Path $frontendDir ".next\types") -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath (Join-Path $frontendDir ".next\dev\types") -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath (Join-Path $frontendDir "tsconfig.tsbuildinfo") -Force -ErrorAction SilentlyContinue
       npm install
-      npm run build
+      npx next build --webpack
     } finally {
       Pop-Location
     }
@@ -397,6 +402,9 @@ Require-File $standaloneServer "Next standalone server.js was not built"
 
 Copy-Item -LiteralPath (Join-Path $repo "dist\Backend.exe") -Destination (Join-Path $appDir "Backend.exe") -Force
 Copy-Item -LiteralPath (Join-Path $repo "dist\customer-launcher\MultiTradingLauncher.exe") -Destination (Join-Path $appDir "MultiTradingLauncher.exe") -Force
+if (Test-Path $launcherIconPath) {
+  python (Join-Path $repo "scripts\apply_windows_icon.py") --exe (Join-Path $appDir "MultiTradingLauncher.exe") --ico $launcherIconPath
+}
 
 Copy-Dir $standalone (Join-Path $appDir "frontend")
 foreach ($sourceDir in @("app", "components", "lib", "convex")) {
@@ -465,6 +473,7 @@ How to start:
 2. The launcher opens MultiTrading in an Edge/Chrome app window when available.
 3. Configure broker, market data, Feishu and other local settings in Setup.
 4. Import the local License issued by the administrator in Personal Center.
+5. Closing the MultiTrading app window stops the local backend, frontend and managed workers.
 
 Notes:
 - This customer package does not expose source files, payment-order admin, or license-issuing admin pages.
@@ -514,6 +523,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=$($releaseDir.Replace("\", "\\"))
 OutputBaseFilename=MultiTradingSetup-$Version
+SetupIconFile=$($installerIconPath.Replace("\", "\\"))
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -551,6 +561,9 @@ if ($SkipSetupExe) {
   $env:CGO_ENABLED = "0"
   go build -trimpath -ldflags "-s -w -H=windowsgui" -o (Join-Path $releaseDir "MultiTradingSetup-$Version.exe") .
   Pop-Location
+  if (Test-Path $installerIconPath) {
+    python (Join-Path $repo "scripts\apply_windows_icon.py") --exe (Join-Path $releaseDir "MultiTradingSetup-$Version.exe") --ico $installerIconPath
+  }
 }
 
 Write-Host "[9/9] Building Inno installer if available..."

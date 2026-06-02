@@ -133,6 +133,17 @@ class TestApiOptionsEndpoints(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual("single_leg", r.json()["mode"])
 
+    @patch("api.main._gateway_get_json", return_value=None)
+    @patch("api.main.ensure_contexts", side_effect=RuntimeError("broker_connect_breaker_open"))
+    def test_internal_longport_quote_returns_unavailable_on_broker_breaker(self, _mock_ctx, _mock_gateway):
+        r = self.client.get("/internal/longport/quote", params={"symbol": "QQQ.US"}, headers=self.headers)
+
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual("QQQ.US", body["symbol"])
+        self.assertFalse(body["available"])
+        self.assertEqual("broker_connect_unavailable", body["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

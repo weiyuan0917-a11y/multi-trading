@@ -130,6 +130,25 @@ def l3_confirmation_status(
     }
 
 
+def resolve_l3_confirmation_token(
+    explicit_token: str | None = None,
+    *,
+    owner_id: str | None = None,
+    root: str | Path | None = None,
+) -> str:
+    submitted = _clean(explicit_token)
+    if submitted:
+        return submitted
+    owner = _clean(owner_id).lower()
+    if owner:
+        owner_token = _clean(
+            _effective_l3_env(_load_user_env(owner, root)).get("OPENCLAW_MCP_L3_CONFIRMATION_TOKEN")
+        )
+        if owner_token:
+            return owner_token
+    return _clean(os.getenv("OPENCLAW_MCP_L3_CONFIRMATION_TOKEN"))
+
+
 def _validate_settings(settings: dict[str, object], submitted: str) -> str | None:
     max_level = str(settings.get("max_level") or "L2")
     allow_l3 = bool(settings.get("allow_l3"))
