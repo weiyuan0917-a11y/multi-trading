@@ -15,7 +15,7 @@
   <br />
   <a href="./CHANGELOG.md">更新日志 / Changelog</a>
   <br />
-  当前源码与客户版构建脚本版本：V1.0.18（安装包发布后更新 Release 下载链接）
+  当前源码与客户版构建脚本版本：V1.0.33（安装包发布后更新 Release 下载链接）
 </p>
 
 <p align="center">
