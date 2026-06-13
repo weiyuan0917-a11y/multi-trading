@@ -7,6 +7,26 @@ from mcp_server.strategies import get_strategy
 from .types import EntryDecision, ScanContext
 
 
+def _bar_meta(ctx: ScanContext, bars: list[Any], required_bars: int = 0) -> dict[str, Any]:
+    last = bars[-1] if bars else None
+    meta: dict[str, Any] = {
+        "bar_count": len(bars),
+        "required_bars": int(required_bars or 0),
+        "kline": ctx.kline,
+        "bars_days": ctx.bars_days,
+    }
+    if last is not None:
+        try:
+            meta["last_close"] = round(float(last.close), 6)
+        except Exception:
+            pass
+        try:
+            meta["last_bar_time"] = str(last.date)
+        except Exception:
+            pass
+    return meta
+
+
 class EntryRule:
     name = "base_entry_rule"
 
@@ -26,10 +46,12 @@ class StrategyCrossRule(EntryRule):
                 should_enter=False,
                 reason="insufficient_bars",
                 strategy=ctx.strategy_name,
+                metadata={"entry_rule": self.name, **_bar_meta(ctx, bars, 25)},
             )
         sp = ctx.strategy_params if isinstance(ctx.strategy_params, dict) and ctx.strategy_params else None
         sfn = get_strategy(ctx.strategy_name, sp)
         now = sfn(bars, 0)
+        prev = None
         if ctx.relaxed_mode:
             hit = now == "buy"
         else:
@@ -39,7 +61,14 @@ class StrategyCrossRule(EntryRule):
             should_enter=bool(hit),
             reason="strategy_buy_signal" if hit else "no_buy_signal",
             strategy=ctx.strategy_name,
-            metadata={"entry_rule": self.name},
+            metadata={
+                "entry_rule": self.name,
+                **_bar_meta(ctx, bars, 25),
+                "current_signal": now,
+                "previous_signal": prev,
+                "relaxed_mode": bool(ctx.relaxed_mode),
+                "strict_cross_waiting": bool((not ctx.relaxed_mode) and now == "buy" and prev == "buy"),
+            },
         )
 
 
@@ -56,7 +85,12 @@ class BreakoutRule(EntryRule):
         bars = fetch_bars(ctx.symbol, ctx.bars_days, ctx.kline)
         need = self.lookback_bars + 1
         if len(bars) < need:
-            return EntryDecision(False, "insufficient_bars", ctx.strategy_name, metadata={"entry_rule": self.name})
+            return EntryDecision(
+                False,
+                "insufficient_bars",
+                ctx.strategy_name,
+                metadata={"entry_rule": self.name, **_bar_meta(ctx, bars, need), "lookback_bars": self.lookback_bars},
+            )
         last = bars[-1]
         prev = bars[-(self.lookback_bars + 1):-1]
         last_close = float(last.close)
@@ -79,10 +113,14 @@ class BreakoutRule(EntryRule):
             strategy=ctx.strategy_name,
             metadata={
                 "entry_rule": self.name,
+                **_bar_meta(ctx, bars, need),
                 "lookback_bars": self.lookback_bars,
                 "prev_high": round(prev_high, 6),
                 "last_close": round(last_close, 6),
                 "volume_ratio": round(vol_ratio, 3),
+                "volume_ratio_threshold": self.min_volume_ratio,
+                "breakout_hit": bool(breakout_hit),
+                "volume_ok": bool(vol_ok),
             },
         )
 
@@ -113,7 +151,7 @@ class MeanReversionRule(EntryRule):
         bars = fetch_bars(ctx.symbol, ctx.bars_days, ctx.kline)
         need = max(25, self.ma_period + 1)
         if len(bars) < need:
-            return EntryDecision(False, "insufficient_bars", ctx.strategy_name, metadata={"entry_rule": self.name})
+            return EntryDecision(False, "insufficient_bars", ctx.strategy_name, metadata={"entry_rule": self.name, **_bar_meta(ctx, bars, need)})
         closes = [float(x.close) for x in bars]
         ma = sum(closes[-self.ma_period:]) / self.ma_period
         last = closes[-1]
@@ -127,6 +165,7 @@ class MeanReversionRule(EntryRule):
             strategy=ctx.strategy_name,
             metadata={
                 "entry_rule": self.name,
+                **_bar_meta(ctx, bars, need),
                 "rsi14": round(rsi, 3),
                 "rsi_threshold": self.rsi_threshold,
                 "ma_period": self.ma_period,
