@@ -11,11 +11,11 @@
 </p>
 
 <p align="center">
-  <strong><a href="https://github.com/weiyuan0917-a11y/multi-trading/releases/tag/V1.0.80">下载 Windows 安装包：MultiTradingSetup-1.0.80.exe</a></strong>
+  <strong><a href="https://github.com/weiyuan0917-a11y/multi-trading/releases/tag/V1.0.102">下载 Windows 安装包：MultiTradingSetup-1.0.102.exe</a></strong>
   <br />
   <a href="./CHANGELOG.md">更新日志 / Changelog</a>
   <br />
-  当前源码与客户版构建脚本版本：V1.0.80（安装包发布后更新 Release 下载链接）
+  当前源码与客户版构建脚本版本：V1.0.102（安装包发布后更新 Release 下载链接）
 </p>
 
 <p align="center">
