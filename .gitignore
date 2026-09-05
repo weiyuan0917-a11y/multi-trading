@@ -1,0 +1,70 @@
+# Local secrets and configuration
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.secret
+*.token
+
+# Local user and runtime state
+data/user_env/
+data/accounts/
+data/auth/
+data/audit/
+data/backtests/
+data/market_cache/
+data/option_quotes/
+data/strategy_runs/
+data/*/*.json
+!data/*/*.example.json
+!data/**/.gitkeep
+*.pid
+*.db
+*.lock
+*.sqlite
+*.log
+logs/
+
+# Python
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Build output and local archives
+dist/
+build/
+output/
+backups/
+.runtime/
+.tmp/
+tmp/
+*.spec.bak
+
+# Private Pro extension workspace
+/pro/

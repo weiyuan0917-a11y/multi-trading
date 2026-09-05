@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "audit-evidence-chain-and-export",
+      "dimensions": ["evidence", "rendering", "deployment"],
+      "required": [
+        "Each report carries an append-only event timeline, previous hash, event hash, account scope, and generated-at timestamp.",
+        "The ZIP bundle contains report.json, report.md, events.jsonl, data-manifest.json, and checksums.sha256.",
+        "Secret-bearing request fields are redacted before persistence and export."
+      ],
+      "forbidden": [
+        "An exported report exposing credential, token, password, secret, authorization, or webhook values."
+      ]
+    },
+    {
+      "id": "backtest-assumption-provenance",
+      "dimensions": ["period", "evidence", "rendering"],
+      "required": [
+        "Backtest requests retain their selected period, strategy parameters, capital, execution assumptions, data request, and resulting evidence payload.",
+        "The rendered timeline labels the originating tool and completion status."
+      ],
+      "forbidden": [
+        "A backtest conclusion with no preserved request parameters or no source event."
+      ]
+    },
+    {
+      "id": "non-financial-research-boundary",
+      "dimensions": ["industry", "ir", "expectations", "analyst_views"],
+      "required": [
+        "The audit report records only evidence actually produced by MCP calls and does not infer sector KPI, IR, consensus, or named analyst data.",
+        "Missing evidence remains absent or explicitly unavailable in the evidence timeline."
+      ],
+      "forbidden": [
+        "Fabricated industry routing, investor-relations provenance, consensus surprise, or named analyst views."
+      ]
+    }
+  ]
+}

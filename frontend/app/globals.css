@@ -1,0 +1,12 @@
+:root { color: #1c2430; background: #f6f8fb; font-family: Arial, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 860px; margin: 72px auto; padding: 0 24px; }
+.eyebrow { color: #0b7a75; font-weight: 700; }
+h1 { font-size: 34px; margin: 8px 0; }
+.summary { max-width: 650px; line-height: 1.6; }
+section { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 32px 0 20px; }
+input { width: 120px; padding: 10px; border: 1px solid #aeb7c2; border-radius: 4px; }
+button { padding: 10px 14px; border: 0; border-radius: 4px; background: #0b7a75; color: white; cursor: pointer; }
+button.paper { background: #2456a6; }
+pre { overflow: auto; background: white; border: 1px solid #d9e0e8; padding: 18px; border-radius: 4px; line-height: 1.45; }

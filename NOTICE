@@ -1,0 +1,44 @@
+Multi-Trading
+Copyright 2026 Multi-Trading contributors
+
+Multi-Trading is released under the Apache License, Version 2.0.
+
+Maintainer contact:
+
+- Open a GitHub issue for project support or security reports.
+
+The Multi-Trading name, logo, and visual identity are used to identify this
+project. The Apache License does not grant trademark rights. Please do not use
+the project name or logo in a way that suggests endorsement, official
+affiliation, or authorship by the Multi-Trading maintainers unless you have
+written permission.
+
+Acknowledgements
+----------------
+
+This project is built with, integrates with, or is inspired by open-source
+projects and public developer ecosystems, including:
+
+- TradingAgents by TauricResearch, an open-source multi-agent financial
+  trading research framework.
+- OpenBB, an open financial data and analytics platform.
+- FastAPI, Uvicorn, Starlette, Next.js, React, Tailwind CSS, ECharts,
+  Model Context Protocol, Longbridge OpenAPI SDK, pandas, NumPy,
+  scikit-learn, and other open-source dependencies listed in the dependency
+  files and source tree.
+
+Third-party names, trademarks, and logos belong to their respective owners.
+Multi-Trading is not affiliated with, endorsed by, or sponsored by those
+projects or companies unless explicitly stated.
+
+Trading and investment risk
+---------------------------
+
+Multi-Trading Community is software for market research, backtesting, and
+paper/rehearsal workflows. It does not include broker adapters, account
+credentials, live order submission, investment advice, financial advice, legal
+advice, tax advice, or broker-dealer services.
+
+Multi-Trading Community 仅供学习交流、研究和模拟演示。软件输出的交易
+信号、策略评分、行情分析、回测结果和智能体报告均仅供参考，不构成买卖依据。
+Community 不支持连接真实券商或提交实盘订单。
